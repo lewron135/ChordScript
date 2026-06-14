@@ -1,0 +1,133 @@
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { calculateGridLayout, estimateBeatCellWidth, getDynamicFontSize, getGridColumnsClass, GridLayoutConfig } from '@/utils/chordStyling';
+
+/**
+ * Custom hook for managing ChordGrid layout and sizing
+ * Consolidates layout calculations, responsive behavior, and sizing logic
+ */
+export const useChordGridLayout = (
+  isUploadPage: boolean,
+  timeSignature: number,
+  chordsLength: number,
+  isChatbotOpen: boolean,
+  isLyricsPanelOpen: boolean
+) => {
+  // Container and screen dimensions
+  const [containerWidth, setContainerWidth] = useState<number>(0);
+  const [screenWidth, setScreenWidth] = useState<number>(0);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+
+  // Initialize screen width
+  useEffect(() => {
+    const updateScreenWidth = () => {
+      setScreenWidth(window.innerWidth);
+    };
+
+    updateScreenWidth();
+    window.addEventListener('resize', updateScreenWidth);
+    return () => window.removeEventListener('resize', updateScreenWidth);
+  }, []);
+
+  // Container resize observer
+  const containerRef = useCallback((node: HTMLDivElement | null) => {
+    resizeObserverRef.current?.disconnect();
+    resizeObserverRef.current = null;
+
+    if (!node) return;
+
+    const updateContainerWidth = (width: number) => {
+      setContainerWidth((currentWidth) => (
+        Math.abs(currentWidth - width) >= 1 ? width : currentWidth
+      ));
+    };
+
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width } = entry.contentRect;
+        updateContainerWidth(width);
+      }
+    });
+
+    updateContainerWidth(node.getBoundingClientRect().width);
+    resizeObserver.observe(node);
+    resizeObserverRef.current = resizeObserver;
+  }, []);
+
+  useEffect(() => () => {
+    resizeObserverRef.current?.disconnect();
+    resizeObserverRef.current = null;
+  }, []);
+
+  // Grid layout configuration
+  const gridLayoutConfig = useMemo((): GridLayoutConfig => {
+    return calculateGridLayout(
+      isUploadPage,
+      timeSignature,
+      chordsLength,
+      containerWidth,
+      screenWidth,
+      isChatbotOpen,
+      isLyricsPanelOpen
+    );
+  }, [isUploadPage, timeSignature, chordsLength, containerWidth, screenWidth, isChatbotOpen, isLyricsPanelOpen]);
+
+  // Calculate cell size based on layout
+  const cellSize = useMemo(() => {
+    if (containerWidth === 0) return 80; // Default fallback
+
+    const { measuresPerRow } = gridLayoutConfig;
+    const availableWidth = containerWidth * 0.95; // Account for padding
+    const cellWidth = Math.floor(estimateBeatCellWidth(availableWidth, measuresPerRow, timeSignature));
+
+    // Ensure minimum cell size for touch targets
+    const MIN_CELL_SIZE = 44;
+    return Math.max(cellWidth, MIN_CELL_SIZE);
+  }, [containerWidth, gridLayoutConfig, timeSignature]);
+
+  // Memoized utility functions
+  const getDynamicFontSizeLocal = useCallback((chordLength: number = 1): string => {
+    return getDynamicFontSize(cellSize, chordLength);
+  }, [cellSize]);
+
+  const getGridColumnsClassLocal = useCallback((): string => {
+    return getGridColumnsClass(timeSignature);
+  }, [timeSignature]);
+
+  // Grouped measures calculation
+  const groupedByMeasure = useMemo(() => {
+    if (chordsLength === 0) return [];
+
+    const { measuresPerRow } = gridLayoutConfig;
+    const groups = [];
+    
+    for (let i = 0; i < chordsLength; i += timeSignature) {
+      const measureChords = [];
+      for (let j = 0; j < timeSignature; j++) {
+        measureChords.push(i + j);
+      }
+      groups.push({
+        measureIndex: Math.floor(i / timeSignature),
+        chordIndices: measureChords,
+        rowIndex: Math.floor(groups.length / measuresPerRow)
+      });
+    }
+    
+    return groups;
+  }, [chordsLength, timeSignature, gridLayoutConfig]);
+
+  return {
+    // Layout state
+    containerWidth,
+    screenWidth,
+    cellSize,
+    gridLayoutConfig,
+    groupedByMeasure,
+    
+    // Utility functions
+    getDynamicFontSize: getDynamicFontSizeLocal,
+    getGridColumnsClass: getGridColumnsClassLocal,
+    
+    // Refs and handlers
+    containerRef,
+  };
+};

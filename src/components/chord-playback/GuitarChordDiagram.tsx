@@ -1,0 +1,363 @@
+'use client';
+
+import React from 'react';
+import Image from 'next/image';
+import Chord from '@tombatossals/react-chords/lib/Chord';
+import { formatChordWithMusicalSymbols } from '@/utils/chordFormatting';
+import AppTooltip from '@/components/common/AppTooltip';
+
+interface ChordPosition {
+  frets: number[];
+  fingers: number[];
+  baseFret: number;
+  barres: number[];
+  capo?: boolean;
+  midi?: number[];
+}
+
+interface ChordData {
+  key: string;
+  suffix: string;
+  positions: ChordPosition[];
+}
+
+interface GuitarChordDiagramProps {
+  chordData: ChordData | null;
+  positionIndex?: number; // Which position to display (default: 0)
+  size?: 'small' | 'medium' | 'large';
+  className?: string;
+  showChordName?: boolean;
+  lite?: boolean; // Simplified rendering
+  displayName?: string; // Override chord name display (for enharmonic corrections)
+  soundingChordName?: string; // The actual sounding chord name (when capo is active)
+  isFocused?: boolean; // Whether this chord diagram is currently focused/active
+  customWidth?: number; // Override size preset width for responsive sizing
+  customHeight?: number; // Override size preset height for responsive sizing
+  segmentationColor?: string; // Segmentation color for border styling
+  showPositionSelector?: boolean; // Show position selector for multiple positions
+  onPositionChange?: (positionIndex: number) => void; // Callback for position changes
+  capoFret?: number; // Capo fret position (0 = no capo, 1-12 = capo position)
+  capoLabelMode?: 'shape' | 'sound'; // Whether to show shape name or sounding name
+  // Roman numeral analysis props
+  showRomanNumerals?: boolean;
+  romanNumeral?: React.ReactElement | string;
+  labelClassName?: string;
+  romanNumeralClassName?: string;
+
+}
+
+// Standard guitar instrument configuration
+const GUITAR_INSTRUMENT = {
+  strings: 6,
+  fretsOnChord: 4,
+  name: 'Guitar',
+  keys: [],
+  tunings: {
+    standard: ['E', 'A', 'D', 'G', 'B', 'E']
+  }
+};
+
+function reconstructChordNameFromChordData(chordData: ChordData): string {
+  const keyForDisplay = chordData.key === 'Csharp' ? 'C#'
+    : chordData.key === 'Fsharp' ? 'F#'
+    : chordData.key;
+
+  if (chordData.suffix === 'major') {
+    return keyForDisplay;
+  }
+
+  if (chordData.suffix.startsWith('/')) {
+    return `${keyForDisplay}${chordData.suffix}`;
+  }
+
+  if (chordData.suffix.startsWith('m/')) {
+    return `${keyForDisplay}${chordData.suffix}`;
+  }
+
+  return `${keyForDisplay}:${chordData.suffix}`;
+}
+
+function formatChordLabel(label?: string): string {
+  if (!label) {
+    return '';
+  }
+
+  if (label.includes(' | ')) {
+    return label
+      .split(' | ')
+      .map((part) => {
+        const accidentalPreference = /[b♭]/.test(part) ? 'flat' : /[#♯]/.test(part) ? 'sharp' : undefined;
+        return formatChordWithMusicalSymbols(part, false, accidentalPreference);
+      })
+      .join(' | ');
+  }
+
+  const accidentalPreference = /[b♭]/.test(label) ? 'flat' : /[#♯]/.test(label) ? 'sharp' : undefined;
+  return formatChordWithMusicalSymbols(label, false, accidentalPreference);
+}
+
+const GuitarChordDiagramComponent: React.FC<GuitarChordDiagramProps> = ({
+  chordData,
+  positionIndex = 0,
+  size = 'medium',
+  className = '',
+  showChordName = true,
+  lite = false,
+  displayName,
+  soundingChordName,
+  isFocused = false,
+  customWidth,
+  customHeight,
+  segmentationColor,
+  showPositionSelector = false,
+  onPositionChange,
+  capoFret = 0,
+  capoLabelMode = 'shape',
+  showRomanNumerals = false,
+  romanNumeral,
+  labelClassName,
+  romanNumeralClassName
+}) => {
+  // Size configurations - responsive sizing
+  const sizeConfig = {
+    small: { width: 70, height: 90 },
+    medium: { width: 90, height: 115 },
+    large: { width: 140, height: 175 }
+  };
+
+  // Compute dimensions: use custom overrides for responsive sizing, or fall back to presets
+  const { width: presetWidth, height: presetHeight } = sizeConfig[size];
+  const width = customWidth ?? presetWidth;
+  const height = customHeight ?? presetHeight;
+
+  const withAlpha = (color: string, alpha: number): string => {
+    const rgbaMatch = color.match(/rgba?\(([^)]+)\)/i);
+    if (!rgbaMatch) return color;
+
+    const channels = rgbaMatch[1].split(',').map((part) => part.trim());
+    if (channels.length < 3) return color;
+
+    return `rgba(${channels[0]}, ${channels[1]}, ${channels[2]}, ${alpha})`;
+  };
+
+  const focusedAccentColor = segmentationColor || 'rgba(59, 130, 246, 0.6)';
+  const focusedDiagramStyle = isFocused
+    ? {
+        boxShadow: `0 0 0 2px ${withAlpha(focusedAccentColor, segmentationColor ? 0.75 : 0.6)}`,
+        backgroundColor: withAlpha(focusedAccentColor, segmentationColor ? 0.18 : 0.12),
+      }
+    : undefined;
+  const focusedLabelStyle = isFocused
+    ? { color: withAlpha(focusedAccentColor, segmentationColor ? 0.95 : 1) }
+    : undefined;
+
+  // Return quarter rest SVG for N.C. (No Chord)
+  if (!chordData || !chordData.positions || chordData.positions.length === 0) {
+    const restSize = Math.min(width * 0.6, height * 0.6); // Scale rest to 60% of container
+
+    return (
+      <div className={`flex flex-col items-center justify-center ${className}`}>
+        <div
+          className="flex items-center justify-center transition-all duration-200 rounded-lg"
+          style={{
+            width: `${width}px`,
+            height: `${height}px`,
+            ...focusedDiagramStyle,
+          }}
+        >
+          <Image
+            src="/quarter_rest.svg"
+            alt="No Chord"
+            width={restSize}
+            height={restSize}
+            className="quarter-rest-responsive transition-all duration-200 brightness-[0.4] dark:brightness-100 dark:invert"
+          />
+        </div>
+        {showChordName && (
+          <span className={`font-varela text-center font-semibold mt-1 ${
+            size === 'small' ? 'text-xs' :
+            size === 'medium' ? 'text-sm' :
+            'text-base'
+          } ${
+            isFocused
+              ? 'font-semibold'
+              : 'text-gray-500 dark:text-gray-400' // Unfocused: lighter
+          } transition-all duration-200 ${labelClassName || ''}`}
+          style={focusedLabelStyle}>
+            No Chord
+          </span>
+        )}
+
+        {/* Roman numeral display for No Chord */}
+        {showRomanNumerals && romanNumeral && (
+          <AppTooltip content={`Roman numeral: ${typeof romanNumeral === 'string' ? romanNumeral : romanNumeral.toString()}`}>
+            <div
+              className={`font-varela text-center font-semibold mt-0.5 text-blue-700 dark:text-blue-300 ${
+                size === 'small' ? 'text-xs' :
+                size === 'medium' ? 'text-sm' :
+                'text-base'
+              }`}
+            >
+              {React.isValidElement(romanNumeral)
+                ? romanNumeral
+                : typeof romanNumeral === 'string'
+                ? romanNumeral.replace(/\|/g, '/')
+                : romanNumeral
+              }
+            </div>
+          </AppTooltip>
+        )}
+      </div>
+    );
+  }
+
+  // Get the position to display (default to first position)
+  const position = chordData.positions[Math.min(positionIndex, chordData.positions.length - 1)];
+
+  // Convert chord data to format expected by react-chords
+  const chordForDiagram = {
+    frets: position.frets,
+    fingers: position.fingers,
+    barres: position.barres || [],
+    capo: position.capo || false,
+    baseFret: capoFret > 0
+      ? (position.baseFret || 1) + capoFret
+      : (position.baseFret || 1)
+  };
+
+  // Use the centralized chord formatting function for consistency with beat/chord grid.
+  // `displayName` is expected to already be resolved by the mapping service:
+  // exact inversion when supported, otherwise the root-position fallback label.
+  // Determine which chord name to display based on capo label mode
+  const getFormattedChordName = (): string => {
+    // When capo is active and mode is 'sound', show the sounding chord name
+    if (capoFret > 0 && capoLabelMode === 'sound' && soundingChordName) {
+      return formatChordLabel(soundingChordName);
+    }
+
+    if (displayName) {
+      return formatChordLabel(displayName);
+    }
+
+    if (chordData) {
+      return formatChordLabel(reconstructChordNameFromChordData(chordData));
+    }
+
+    return '';
+  };
+
+  return (
+    <div className={`flex flex-col items-center ${className}`}>
+      {/* Chord diagram - transparent, sits directly on parent background */}
+      <div
+        className="chord-diagram-container relative overflow-hidden transition-all duration-200 rounded-lg"
+        style={{
+          width: `${width}px`,
+          height: `${height}px`,
+          ...focusedDiagramStyle,
+        }}
+      >
+        <div className="chord-diagram-svg">
+          <Chord
+            chord={chordForDiagram}
+            instrument={GUITAR_INSTRUMENT}
+            lite={lite}
+          />
+        </div>
+      </div>
+
+      {/* Chord name */}
+      {showChordName && (
+        <span
+          className={`font-varela text-center font-semibold mt-1 ${
+            size === 'small' ? 'text-xs' :
+            size === 'medium' ? 'text-sm' :
+            'text-base'
+          } ${
+            isFocused
+              ? 'font-semibold'
+              : 'text-gray-600 dark:text-gray-400' // Unfocused: lighter in both modes
+          } transition-all duration-200 ${labelClassName || ''}`}
+          style={focusedLabelStyle}
+          dangerouslySetInnerHTML={{
+            __html: getFormattedChordName()
+          }}
+        />
+      )}
+
+      {/* Roman numeral display */}
+      {showRomanNumerals && romanNumeral && (
+        <AppTooltip content={`Roman numeral: ${typeof romanNumeral === 'string' ? romanNumeral : romanNumeral.toString()}`}>
+          <div
+            className={`font-varela text-center font-semibold mt-0.5 text-blue-700 dark:text-blue-300 ${
+              size === 'small' ? 'text-xs' :
+              size === 'medium' ? 'text-sm' :
+              'text-base'
+            } ${romanNumeralClassName || ''}`}
+          >
+            {typeof romanNumeral === 'string'
+              ? romanNumeral.replace(/\|/g, '/')
+              : romanNumeral
+            }
+          </div>
+        </AppTooltip>
+      )}
+
+      {/* Position selector for multiple chord positions */}
+      {showPositionSelector && chordData && chordData.positions.length > 1 && (
+        <div className="relative z-[70] flex items-center justify-center mt-1.5 space-x-2">
+          <button
+            onClick={() => onPositionChange && onPositionChange(positionIndex > 0 ? positionIndex - 1 : chordData.positions.length - 1)}
+            className="w-6 h-6 flex items-center justify-center text-xs bg-gray-200/60 dark:bg-gray-600/60 text-gray-700 dark:text-gray-200 rounded-full hover:bg-gray-300/70 dark:hover:bg-gray-500/70 transition-colors"
+            disabled={!onPositionChange}
+            aria-label="Previous chord position"
+          >
+            ‹
+          </button>
+          <span className="text-xs text-gray-500 dark:text-gray-400 font-medium min-w-[2rem] text-center">
+            {positionIndex + 1}/{chordData.positions.length}
+          </span>
+          <button
+            onClick={() => onPositionChange && onPositionChange(positionIndex < chordData.positions.length - 1 ? positionIndex + 1 : 0)}
+            className="w-6 h-6 flex items-center justify-center text-xs bg-gray-200/60 dark:bg-gray-600/60 text-gray-700 dark:text-gray-200 rounded-full hover:bg-gray-300/70 dark:hover:bg-gray-500/70 transition-colors"
+            disabled={!onPositionChange}
+            aria-label="Next chord position"
+          >
+            ›
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const areChordDiagramPropsEqual = (
+  prevProps: GuitarChordDiagramProps,
+  nextProps: GuitarChordDiagramProps
+): boolean => {
+  if (prevProps.chordData !== nextProps.chordData) return false;
+  if (prevProps.positionIndex !== nextProps.positionIndex) return false;
+  if (prevProps.size !== nextProps.size) return false;
+  if (prevProps.className !== nextProps.className) return false;
+  if (prevProps.showChordName !== nextProps.showChordName) return false;
+  if (prevProps.lite !== nextProps.lite) return false;
+  if (prevProps.displayName !== nextProps.displayName) return false;
+  if (prevProps.soundingChordName !== nextProps.soundingChordName) return false;
+  if (prevProps.isFocused !== nextProps.isFocused) return false;
+  if (prevProps.customWidth !== nextProps.customWidth) return false;
+  if (prevProps.customHeight !== nextProps.customHeight) return false;
+  if (prevProps.segmentationColor !== nextProps.segmentationColor) return false;
+  if (prevProps.showPositionSelector !== nextProps.showPositionSelector) return false;
+  if (prevProps.capoFret !== nextProps.capoFret) return false;
+  if (prevProps.capoLabelMode !== nextProps.capoLabelMode) return false;
+  if (prevProps.showRomanNumerals !== nextProps.showRomanNumerals) return false;
+  if (prevProps.romanNumeral !== nextProps.romanNumeral) return false;
+  if (prevProps.labelClassName !== nextProps.labelClassName) return false;
+  if (prevProps.romanNumeralClassName !== nextProps.romanNumeralClassName) return false;
+  return true;
+};
+
+export const GuitarChordDiagram = React.memo(GuitarChordDiagramComponent, areChordDiagramPropsEqual);
+GuitarChordDiagram.displayName = 'GuitarChordDiagram';
+
+export default GuitarChordDiagram;

@@ -1,0 +1,370 @@
+/**
+ * Audio Mixer Service
+ * Centralized volume management for all audio sources in the application
+ * Handles YouTube video, chord playback instruments, and master volume controls
+ */
+
+import { DEFAULT_AUDIO_MIXER_SETTINGS } from '@/config/audioDefaults';
+
+export interface AudioMixerSettings {
+  masterVolume: number; // 0-100
+  youtubeVolume: number; // 0-100 (YouTube video playback)
+  pitchShiftedAudioVolume: number; // 0-100 (Pitch-shifted audio from Firebase/local upload)
+  chordPlaybackVolume: number; // 0-100
+  pianoVolume: number; // 0-100
+  guitarVolume: number; // 0-100
+  violinVolume: number; // 0-100
+  melodyVolume: number; // 0-100
+  fluteVolume: number; // 0-100
+  saxophoneVolume: number; // 0-100
+  bassVolume: number; // 0-100 (new)
+  metronomeVolume: number; // 0-100
+}
+
+export interface YouTubePlayer {
+  seekTo: (time: number, type?: 'seconds' | 'fraction') => void;
+  playVideo: () => void;
+  pauseVideo: () => void;
+  setPlaybackRate: (rate: number) => void;
+  getCurrentTime: () => number;
+  muted: boolean;
+  // Volume control methods (may not be available on all YouTube player implementations)
+  setVolume?: (volume: number) => void;
+  getVolume?: () => number;
+  mute?: () => void;
+  unMute?: () => void;
+  isMuted?: () => boolean;
+}
+
+export class AudioMixerService {
+  private settings: AudioMixerSettings = { ...DEFAULT_AUDIO_MIXER_SETTINGS };
+
+  private youtubePlayer: YouTubePlayer | null = null;
+  private chordPlaybackService: { updateOptions: (options: Partial<{ pianoVolume: number; guitarVolume: number; violinVolume: number; melodyVolume: number; fluteVolume: number; saxophoneVolume: number; bassVolume: number }>) => void } | null = null;
+  private metronomeService: { setVolume: (volume: number) => void } | null = null;
+  private listeners: Array<(settings: AudioMixerSettings) => void> = [];
+
+  constructor() {
+    this.loadSettings();
+  }
+
+  /**
+   * Load settings from session storage
+   */
+  private loadSettings() {
+    if (typeof window !== 'undefined') {
+      const saved = sessionStorage.getItem('audioMixerSettings');
+      if (saved) {
+        try {
+          this.settings = { ...this.settings, ...JSON.parse(saved) };
+        } catch (error) {
+          console.warn('Failed to load audio mixer settings:', error);
+        }
+      }
+    }
+  }
+
+  /**
+   * Save settings to session storage
+   */
+  private saveSettings() {
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem('audioMixerSettings', JSON.stringify(this.settings));
+    }
+  }
+
+  /**
+   * Register audio services
+   */
+  setYouTubePlayer(player: YouTubePlayer | null) {
+    this.youtubePlayer = player;
+    if (player) {
+      this.applyYouTubeVolume();
+    }
+  }
+
+  setChordPlaybackService(service: { updateOptions: (options: Partial<{ pianoVolume: number; guitarVolume: number; violinVolume: number; melodyVolume: number; fluteVolume: number; saxophoneVolume: number; bassVolume: number }>) => void } | null) {
+    this.chordPlaybackService = service;
+    this.applyChordPlaybackVolume();
+  }
+
+  setMetronomeService(service: { setVolume: (volume: number) => void } | null) {
+    this.metronomeService = service;
+    this.applyMetronomeVolume();
+  }
+
+  /**
+   * Get current settings
+   */
+  getSettings(): AudioMixerSettings {
+    return { ...this.settings };
+  }
+
+  /**
+   * Add settings change listener
+   */
+  addListener(listener: (settings: AudioMixerSettings) => void) {
+    this.listeners.push(listener);
+    return () => {
+      const index = this.listeners.indexOf(listener);
+      if (index > -1) {
+        this.listeners.splice(index, 1);
+      }
+    };
+  }
+
+  /**
+   * Notify all listeners of settings changes
+   */
+  private notifyListeners() {
+    const snapshot = { ...this.settings };
+    this.listeners.forEach(listener => listener(snapshot));
+  }
+
+  /**
+   * Calculate effective volume with master volume applied
+   */
+  private calculateEffectiveVolume(volume: number): number {
+    return (volume / 100) * (this.settings.masterVolume / 100) * 100;
+  }
+
+  /**
+   * Set master volume (affects all audio sources)
+   */
+  setMasterVolume(volume: number) {
+    this.settings.masterVolume = Math.max(0, Math.min(100, volume));
+    this.applyAllVolumes();
+    this.saveSettings();
+    this.notifyListeners();
+  }
+
+  /**
+   * Set YouTube video volume
+   */
+  setYouTubeVolume(volume: number) {
+    this.settings.youtubeVolume = Math.max(0, Math.min(100, volume));
+    this.applyYouTubeVolume();
+    this.saveSettings();
+    this.notifyListeners();
+  }
+
+  /**
+   * Set pitch-shifted audio volume (separate from YouTube video)
+   */
+  setPitchShiftedAudioVolume(volume: number) {
+    this.settings.pitchShiftedAudioVolume = Math.max(0, Math.min(100, volume));
+    // Note: Pitch-shifted audio volume is applied by the pitch shift service directly
+    // This just stores the setting for UI display and persistence
+    this.saveSettings();
+    this.notifyListeners();
+  }
+
+  /**
+   * Get pitch-shifted audio volume
+   */
+  getPitchShiftedAudioVolume(): number {
+    return this.settings.pitchShiftedAudioVolume;
+  }
+
+  /**
+   * Set chord playback master volume
+   */
+  setChordPlaybackVolume(volume: number) {
+    this.settings.chordPlaybackVolume = Math.max(0, Math.min(100, volume));
+    this.applyChordPlaybackVolume();
+    this.saveSettings();
+    this.notifyListeners();
+  }
+
+  /**
+   * Set piano volume
+   */
+  setPianoVolume(volume: number) {
+    this.settings.pianoVolume = Math.max(0, Math.min(100, volume));
+    this.applyChordPlaybackVolume();
+    this.saveSettings();
+    this.notifyListeners();
+  }
+
+  /**
+   * Set guitar volume
+   */
+  setGuitarVolume(volume: number) {
+    this.settings.guitarVolume = Math.max(0, Math.min(100, volume));
+    this.applyChordPlaybackVolume();
+    this.saveSettings();
+    this.notifyListeners();
+  }
+
+  /**
+   * Set violin volume
+   */
+  setViolinVolume(volume: number) {
+    this.settings.violinVolume = Math.max(0, Math.min(100, volume));
+    this.applyChordPlaybackVolume();
+    this.saveSettings();
+    this.notifyListeners();
+  }
+
+  /**
+   * Set melodic transcription volume
+   */
+  setMelodyVolume(volume: number) {
+    this.settings.melodyVolume = Math.max(0, Math.min(100, volume));
+    if (this.chordPlaybackService) {
+      this.chordPlaybackService.updateOptions({
+        melodyVolume: this.calculateEffectiveVolume(this.settings.melodyVolume),
+      });
+    }
+    this.saveSettings();
+    this.notifyListeners();
+  }
+
+  /**
+   * Set flute volume
+   */
+  setFluteVolume(volume: number) {
+    this.settings.fluteVolume = Math.max(0, Math.min(100, volume));
+    this.applyChordPlaybackVolume();
+    this.saveSettings();
+    this.notifyListeners();
+  }
+
+  /**
+   * Set saxophone volume
+   */
+  setSaxophoneVolume(volume: number) {
+    this.settings.saxophoneVolume = Math.max(0, Math.min(100, volume));
+    this.applyChordPlaybackVolume();
+    this.saveSettings();
+    this.notifyListeners();
+  }
+
+  /**
+   * Set bass volume
+   */
+  setBassVolume(volume: number) {
+    this.settings.bassVolume = Math.max(0, Math.min(100, volume));
+    this.applyChordPlaybackVolume();
+    this.saveSettings();
+    this.notifyListeners();
+  }
+
+  /**
+   * Set metronome volume
+   */
+  setMetronomeVolume(volume: number) {
+    this.settings.metronomeVolume = Math.max(0, Math.min(100, volume));
+    this.applyMetronomeVolume();
+    this.saveSettings();
+    this.notifyListeners();
+  }
+
+  /**
+   * Apply YouTube volume
+   */
+  private applyYouTubeVolume() {
+    if (this.youtubePlayer && this.youtubePlayer.setVolume) {
+      const effectiveVolume = this.calculateEffectiveVolume(this.settings.youtubeVolume);
+      this.youtubePlayer.setVolume(effectiveVolume);
+    }
+  }
+
+  /**
+   * Apply chord playback volume
+   */
+  private applyChordPlaybackVolume() {
+    if (this.chordPlaybackService) {
+      const effectiveChordVolume = this.calculateEffectiveVolume(this.settings.chordPlaybackVolume);
+      const effectivePianoVolume = (this.settings.pianoVolume / 100) * (effectiveChordVolume / 100) * 100;
+      const effectiveGuitarVolume = (this.settings.guitarVolume / 100) * (effectiveChordVolume / 100) * 100;
+      const effectiveViolinVolume = (this.settings.violinVolume / 100) * (effectiveChordVolume / 100) * 100;
+      const effectiveMelodyVolume = this.calculateEffectiveVolume(this.settings.melodyVolume);
+      const effectiveFluteVolume = (this.settings.fluteVolume / 100) * (effectiveChordVolume / 100) * 100;
+      const effectiveSaxophoneVolume = (this.settings.saxophoneVolume / 100) * (effectiveChordVolume / 100) * 100;
+      const effectiveBassVolume = (this.settings.bassVolume / 100) * (effectiveChordVolume / 100) * 100;
+
+      this.chordPlaybackService.updateOptions({
+        pianoVolume: effectivePianoVolume,
+        guitarVolume: effectiveGuitarVolume,
+        violinVolume: effectiveViolinVolume,
+        melodyVolume: effectiveMelodyVolume,
+        fluteVolume: effectiveFluteVolume,
+        saxophoneVolume: effectiveSaxophoneVolume,
+        bassVolume: effectiveBassVolume
+      });
+    }
+  }
+
+  /**
+   * Apply metronome volume
+   */
+  private applyMetronomeVolume() {
+    if (this.metronomeService) {
+      const effectiveVolume = this.calculateEffectiveVolume(this.settings.metronomeVolume) / 100;
+      this.metronomeService.setVolume(effectiveVolume);
+    }
+  }
+
+  /**
+   * Apply all volume settings
+   */
+  private applyAllVolumes() {
+    this.applyYouTubeVolume();
+    this.applyChordPlaybackVolume();
+    this.applyMetronomeVolume();
+  }
+
+  /**
+   * Reset all volumes to defaults
+   */
+  resetToDefaults() {
+    this.settings = { ...DEFAULT_AUDIO_MIXER_SETTINGS };
+    this.applyAllVolumes();
+    this.saveSettings();
+    this.notifyListeners();
+  }
+
+  /**
+   * Mute/unmute all audio
+   */
+  setMasterMute(muted: boolean) {
+    if (muted) {
+      this.setMasterVolume(0);
+    } else {
+      // Restore to a reasonable volume if currently muted
+      if (this.settings.masterVolume === 0) {
+        this.setMasterVolume(80);
+      }
+    }
+  }
+
+  /**
+   * Get effective volumes for display purposes
+   */
+  getEffectiveVolumes() {
+    const effChord = this.calculateEffectiveVolume(this.settings.chordPlaybackVolume);
+    return {
+      youtube: this.calculateEffectiveVolume(this.settings.youtubeVolume),
+      chordPlayback: effChord,
+      piano: (this.settings.pianoVolume / 100) * (effChord / 100) * 100,
+      guitar: (this.settings.guitarVolume / 100) * (effChord / 100) * 100,
+      violin: (this.settings.violinVolume / 100) * (effChord / 100) * 100,
+      melody: this.calculateEffectiveVolume(this.settings.melodyVolume),
+      flute: (this.settings.fluteVolume / 100) * (effChord / 100) * 100,
+      saxophone: (this.settings.saxophoneVolume / 100) * (effChord / 100) * 100,
+      bass: (this.settings.bassVolume / 100) * (effChord / 100) * 100,
+      metronome: this.calculateEffectiveVolume(this.settings.metronomeVolume)
+    };
+  }
+}
+
+// Singleton instance
+let audioMixerService: AudioMixerService | null = null;
+
+export const getAudioMixerService = (): AudioMixerService => {
+  if (!audioMixerService) {
+    audioMixerService = new AudioMixerService();
+  }
+  return audioMixerService;
+};

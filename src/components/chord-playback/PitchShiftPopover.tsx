@@ -1,0 +1,264 @@
+/**
+ * Pitch Shift Popover Component
+ *
+ * Simplified popover control for pitch shifting with semitone and playback speed sliders.
+ * Appears as a popover above/below the pitch shift toggle button.
+ */
+
+'use client';
+
+import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { Popover, PopoverTrigger, PopoverContent, Tooltip, Slider } from '@heroui/react';
+import { motion } from 'framer-motion';
+import { TbMusicUp } from 'react-icons/tb';
+import UtilityPopoverPanel from '@/components/analysis/UtilityPopoverPanel';
+import { getAppSliderClassNames } from '@/components/ui/appSliderStyles';
+import { MIN_SEMITONES, MAX_SEMITONES } from '@/utils/chordTransposition';
+import {
+  useIsPitchShiftEnabled,
+  useTogglePitchShift,
+  usePitchShiftSemitones,
+  useIsProcessingPitchShift,
+  useIsFirebaseAudioAvailable,
+  useSetPitchShiftSemitones
+} from '@/stores/uiStore';
+import { formatSemitones } from '@/utils/chordTransposition';
+
+interface PitchShiftPopoverProps {
+  playbackRate: number;
+  setPlaybackRate: (rate: number) => void;
+}
+
+// React.memo prevents re-renders from parent (UtilityBar) when only unrelated
+// props change (e.g. chordPlayback, segmentation objects). Without this,
+// YouTube progress events (~4×/sec) cascade through the viewModel → UtilityBar
+// → PitchShiftPopover, causing slider jitter during drags. The internal
+// zustand selectors (pitchShiftSemitones, etc.) still trigger re-renders when
+// the slice they subscribe to changes, which is the desired behavior.
+const PitchShiftPopover: React.FC<PitchShiftPopoverProps> = memo(({
+  playbackRate,
+  setPlaybackRate,
+}) => {
+  const successSliderClassNames = getAppSliderClassNames('success');
+  const isPitchShiftEnabled = useIsPitchShiftEnabled();
+  const togglePitchShift = useTogglePitchShift();
+  const pitchShiftSemitones = usePitchShiftSemitones();
+  const isProcessingPitchShift = useIsProcessingPitchShift();
+  const isFirebaseAudioAvailable = useIsFirebaseAudioAvailable();
+  const setPitchShiftSemitones = useSetPitchShiftSemitones();
+
+  const isDisabled = !isFirebaseAudioAvailable;
+  const buttonClassName = `h-9 w-9 min-w-9 rounded-full shadow-md transition-colors duration-200 inline-flex items-center justify-center p-0 ${
+    isPitchShiftEnabled
+      ? 'bg-green-600 text-white hover:bg-green-700'
+      : 'bg-gray-200/60 dark:bg-gray-600/60 text-gray-700 dark:text-gray-200 hover:bg-gray-300/70 dark:hover:bg-gray-500/70'
+  } ${isDisabled ? 'opacity-50 cursor-not-allowed' : ''}`;
+
+  // Local state to control popover visibility independently from pitch shift state
+  const [isPopoverOpen, setIsPopoverOpen] = useState(false);
+  const triggerWrapperRef = useRef<HTMLDivElement | null>(null);
+  const popoverContentRef = useRef<HTMLDivElement | null>(null);
+
+  // Pitch shift slider change handler
+  const handleSliderChange = useCallback(
+    (value: number | number[]) => {
+      const numValue = Array.isArray(value) ? value[0] : value;
+      setPitchShiftSemitones(numValue);
+    },
+    [setPitchShiftSemitones]
+  );
+
+  // Playback speed slider change handler
+  //
+  // The HeroUI `<Slider>` fires `onChange` on every pointer move even when the
+  // snapped value is unchanged, which produced ~60 redundant store writes per
+  // second of drag. `playbackStore.setPlayerPlaybackRate` already short-circuits
+  // on identical rates, but suppressing the call here (a) keeps the console
+  // clean of `.called`/`.shortCircuit` pairs, and (b) avoids the parent
+  // viewModel re-running its `setAudioPlayerState(prev => ...)` updater, which
+  // allocates a fresh object reference each time and triggers needless
+  // re-renders downstream.
+  const handlePlaybackRateChange = useCallback(
+    (value: number | number[]) => {
+      const numValue = Array.isArray(value) ? value[0] : value;
+      if (Math.abs(numValue - playbackRate) < 0.001) return;
+      setPlaybackRate(numValue);
+    },
+    [setPlaybackRate, playbackRate]
+  );
+
+  // Handle toggle button click
+  const handleToggleClick = useCallback(() => {
+    if (!isPitchShiftEnabled) {
+      // Enabling pitch shift: turn it on and open popover
+      togglePitchShift();
+      setIsPopoverOpen(true);
+    } else {
+      // Disabling pitch shift: turn it off and close popover
+      togglePitchShift();
+      setIsPopoverOpen(false);
+    }
+  }, [isPitchShiftEnabled, togglePitchShift]);
+
+  useEffect(() => {
+    if (!isPopoverOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const targetNode = event.target as Node | null;
+      if (!targetNode) {
+        return;
+      }
+
+      if (triggerWrapperRef.current?.contains(targetNode)) {
+        return;
+      }
+
+      if (popoverContentRef.current?.contains(targetNode)) {
+        return;
+      }
+
+      setIsPopoverOpen(false);
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown, true);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown, true);
+    };
+  }, [isPopoverOpen]);
+
+  return (
+    <>
+      <Popover
+        placement="top"
+        offset={10}
+        isOpen={isPopoverOpen && isPitchShiftEnabled && !isDisabled}
+        onOpenChange={(open) => {
+          // Allow popover to close without disabling pitch shift
+          setIsPopoverOpen(open);
+        }}
+        classNames={{
+          content: 'p-0 border-none bg-transparent shadow-none'
+        }}
+      >
+        <PopoverTrigger>
+          <div ref={triggerWrapperRef} className="relative inline-block">
+            <Tooltip
+              content={
+                isDisabled
+                  ? 'Pitch Shift: Audio not available'
+                  : isPitchShiftEnabled
+                  ? 'Disable pitch shift'
+                  : 'Enable pitch shift'
+              }
+              placement="top"
+              classNames={{
+                content: 'bg-white text-gray-900 dark:bg-content-bg dark:text-gray-100 border border-gray-300 dark:border-gray-600 shadow-lg'
+              }}
+            >
+              <motion.button
+                onClick={handleToggleClick}
+                disabled={isDisabled}
+                className={buttonClassName}
+                whileHover={!isDisabled ? { scale: 1.02 } : {}}
+                whileTap={!isDisabled ? { scale: 0.98 } : {}}
+                aria-label={
+                  isDisabled
+                    ? 'Pitch Shift: Audio not available'
+                    : isPitchShiftEnabled
+                    ? 'Disable pitch shift'
+                    : 'Enable pitch shift'
+                }
+                aria-pressed={isPitchShiftEnabled}
+              >
+                <TbMusicUp className="h-4 w-4" />
+              </motion.button>
+            </Tooltip>
+
+            {/* Beta tag */}
+            <div className="absolute -top-1 -right-1 bg-green-500/70 dark:bg-green-500/30 text-white text-[8px] px-1 py-0.5 rounded-full font-bold pointer-events-none">
+              BETA
+            </div>
+          </div>
+        </PopoverTrigger>
+
+        <PopoverContent>
+          <div ref={popoverContentRef}>
+            <UtilityPopoverPanel bodyClassName="space-y-3 p-4 pb-6 min-w-[280px]">
+              <div className="pb-2 pitch-shift-slider">
+                <Slider
+                  label="Pitch Shift"
+                  size="sm"
+                  color="success"
+                  step={1}
+                  minValue={MIN_SEMITONES}
+                  maxValue={MAX_SEMITONES}
+                  value={pitchShiftSemitones}
+                  onChange={handleSliderChange}
+                  isDisabled={isProcessingPitchShift}
+                  showTooltip={true}
+                  getValue={(value) => formatSemitones(Array.isArray(value) ? value[0] : value)}
+                  marks={[
+                    { value: MIN_SEMITONES, label: `${MIN_SEMITONES}` },
+                    { value: 0, label: '0' },
+                    { value: MAX_SEMITONES, label: `+${MAX_SEMITONES}` }
+                  ]}
+                  classNames={{
+                    base: 'max-w-full mb-2',
+                    label: 'text-sm font-medium text-gray-700 dark:text-gray-300',
+                    value: 'text-sm font-semibold text-green-600 dark:text-green-400',
+                    ...successSliderClassNames,
+                    mark: 'text-xs'
+                  }}
+                />
+              </div>
+
+              <div className="border-t border-white/20 dark:border-white/10 my-3" />
+
+              <div className="pb-2 pitch-shift-slider">
+                <Slider
+                  label="Playback Speed"
+                  size="sm"
+                  color="success"
+                  step={0.25}
+                  minValue={0.25}
+                  maxValue={2.0}
+                  value={playbackRate}
+                  onChange={handlePlaybackRateChange}
+                  isDisabled={isProcessingPitchShift}
+                  showTooltip={true}
+                  getValue={(value) => `${(Array.isArray(value) ? value[0] : value).toFixed(2)}x`}
+                  marks={[
+                    { value: 0.25, label: '0.25x' },
+                    { value: 1.0, label: '1.0x' },
+                    { value: 2.0, label: '2.0x' }
+                  ]}
+                  classNames={{
+                    base: 'max-w-full mb-2',
+                    label: 'text-sm font-medium text-gray-700 dark:text-gray-300',
+                    value: 'text-sm font-semibold text-green-600 dark:text-green-400',
+                    ...successSliderClassNames,
+                    mark: 'text-xs'
+                  }}
+                />
+              </div>
+
+              {isProcessingPitchShift && (
+                <div className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400">
+                  <div className="w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                  <span>Processing...</span>
+                </div>
+              )}
+            </UtilityPopoverPanel>
+          </div>
+        </PopoverContent>
+      </Popover>
+    </>
+  );
+});
+
+PitchShiftPopover.displayName = 'PitchShiftPopover';
+
+export default PitchShiftPopover;

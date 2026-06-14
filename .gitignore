@@ -1,0 +1,308 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+/.nyc_output
+/cypress/videos/
+/cypress/screenshots/
+
+# next.js
+/.next/
+/out/
+.next-env
+
+# production
+/build
+/dist
+
+# misc
+.DS_Store
+*.pem
+Thumbs.db
+.project
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+.history/
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Firebase symlinks (actual files are in firebase/ directory)
+/firebase.json
+/firestore.rules
+/firestore.indexes.json
+/storage.rules
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+logs
+*.log
+
+# env files
+.env
+.env.*
+!.env.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# Firebase
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+ui-debug.log
+.runtimeconfig.json
+serviceAccountKey.json
+firebase-adminsdk.json
+
+# PWA
+**/public/workbox-*.js
+**/public/sw.js
+**/public/service-worker.js
+
+# Sentry
+.sentryclirc
+
+# Storybook
+/storybook-static
+
+# Turbo
+.turbo
+
+# Cache
+.cache/
+.eslintcache
+.stylelintcache
+
+# macOS
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Python backend
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+python_backend/lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+ENV/
+.venv/
+python_backend/.env
+python_backend/venv/
+python_backend/__pycache__/
+
+# ML models
+*.h5
+*.pb
+*.tflite
+*.pt
+*.pth
+*.onnx
+*.mlmodel
+/models/
+
+# Audio files (except metronome sounds)
+*.wav
+*.mp3
+*.ogg
+*.flac
+/audio/
+# Allow metronome audio files
+!public/audio/metronome/
+!public/audio/metronome/*.wav
+
+# Custom
+.qodo
+.qoder/
+
+# Cache directories and files
+/cache/
+cache/
+**/cache/
+*.cache
+
+# Temporary audio files
+/temp/
+/tmp/
+*.tmp
+
+# Temporary player script files
+*-player-script.js
+
+# Cached audio files
+/public/audio/
+
+# Python virtual environments
+.venv/
+python_backend/venv/
+**/venv/
+SongFormer/**/.git
+
+# Large binary files
+*.jar
+*.pack
+*.pack.gz
+bfg.jar
+
+# Video files (temporary downloads)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+
+# Data files
+*.npy
+*.npz
+*.pkl
+*.pickle
+
+# Pretrained models
+**/pretrained_models/
+**/checkpoints/
+checkpoints/
+!SongFormer/src/SongFormer/ckpts/SongFormer.safetensors
+!SongFormer/src/SongFormer/ckpts/MusicFM/pretrained_msd.pt
+
+# API keys and sensitive information
+**/api-keys*.txt
+**/keys*.txt
+**/secrets*.txt
+**/credentials*.txt
+**/config/secrets*.json
+**/config/keys*.json
+**/config/credentials*.json
+**/config/api-keys*.json
+**/config/api-keys*.yaml
+**/config/api-keys*.yml
+**/.env.local
+**/.env.development
+**/.env.production
+**/.env.test
+**/.env.*.local
+**/firebase-config*.js
+**/firebase-config*.ts
+**/google-services.json
+**/GoogleService-Info.plist
+**/*.keystore
+**/*.jks
+**/*.p8
+**/*.p12
+**/*.key
+**/*.mobileprovision
+**/*.cer
+**/*.der
+**/*.pfx
+
+!.env.docker.example
+# Cloud deployment configurations with sensitive info
+python_backend/cloudbuild.yaml
+
+# Development and testing files
+test_*.html
+test_*.py
+**/test_output/
+**/test_results/
+task.md
+tasks.md
+*.md.bak
+
+# Documentation files (exclude all .md except README.md and README-PYTHON-BACKEND.md)
+*.md
+!README.md
+!README-PYTHON-BACKEND.md
+!CONTRIBUTING.md
+!.github/pull_request_template.md
+!.qoder/
+!.qoder/repowiki/
+!.qoder/repowiki/en/
+!.qoder/repowiki/en/content/
+!.qoder/repowiki/en/content/**/
+!.qoder/repowiki/en/content/**/*.md
+
+# Backup files
+*.bak
+*.backup
+*.old
+*.orig
+
+# Cookie and config files (may contain sensitive data)
+**/cookies/
+**/config/ytdlp-config.txt
+youtube_cookies.txt
+
+# Output files from processing
+output_with_clicks.wav
+beats_with_positions.txt
+downbeats_measures.txt
+
+
+# Ignore cloud build
+cloudbuild.yaml
+
+yt-dlp-server/
+
+scripts/node_modules/
+scripts/package.json
+scripts/package-lock.json
+scripts/testing
+scripts/utilities
+
+__tests__/
+__tests__/*
+!__tests__/
+!__tests__/fixtures/
+!__tests__/fixtures/builders.ts
+!__tests__/integration/
+!__tests__/integration/**/
+!__tests__/integration/**/*.test.ts
+!__tests__/integration/**/*.test.tsx
+!__tests__/unit/
+!__tests__/unit/services/
+!__tests__/unit/utils/
+!__tests__/unit/services/*.edge.test.ts
+!__tests__/unit/services/*.meterSelection.test.ts
+!__tests__/unit/utils/*.edge.test.ts
+# !__tests__/chordSynchronization.test.ts
+__test-results__/
+
+cloudflare/

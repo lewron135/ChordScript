@@ -1,0 +1,16 @@
+.venv/
+.venv-*/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+src/third_party/MuQ/muq/
+src/third_party/MuQ/muq_mulan/
+src/third_party/musicfm/data/
+src/SongFormer/ckpts/md5sum.txt
+README.md

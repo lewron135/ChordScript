@@ -1,0 +1,1635 @@
+"use client";
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { addToast, closeToast } from '@heroui/react';
+import { mergeToastClassNames } from '@/utils/toastStyles';
+import { useQueryClient } from '@tanstack/react-query';
+import { useRouter } from 'next/navigation';
+import { useProcessing } from '@/contexts/ProcessingContext';
+import { useTheme } from '@/contexts/ThemeContext';
+import { useMetronomeSync } from '@/hooks/chord-playback/useMetronomeSync';
+import { useMelodicTranscriptionPlayback } from '@/hooks/chord-playback/useMelodicTranscriptionPlayback';
+import { metronomeService } from '@/services/chord-playback/metronomeService';
+import { useAudioProcessing } from '@/hooks/audio/useAudioProcessing';
+import { useAudioPlayer } from '@/hooks/chord-playback/useAudioPlayer';
+import { useModelState } from '@/hooks/chord-analysis/useModelState';
+import { useAnalyzePageOrchestrator } from '@/hooks/analyze/useAnalyzePageOrchestrator';
+import { useAnalysisUsageTracker } from '@/hooks/analyze/useAnalysisUsageTracker';
+import { useNavigationHelpers } from '@/hooks/ui/useNavigationHelpers';
+import { transcribeLyricsWithAI as transcribeLyricsWithAIService } from '@/services/audio/audioProcessingExtracted';
+import { youtubeMasterClock } from '@/services/audio/youtubeMasterClock';
+import { getChordGridData as getChordGridDataService } from '@/services/chord-analysis/chordGridCalculationService';
+import { useAudioInteractions } from '@/hooks/chord-playback/useAudioInteractions';
+import { useScrollAndAnimation } from '@/hooks/scroll/useScrollAndAnimation';
+import { usePlaybackState } from '@/hooks/chord-playback/usePlaybackState';
+import { useLoopPlayback, resolveLoopRange } from '@/hooks/chord-playback/useLoopPlayback';
+import { useApiKeys } from '@/hooks/settings/useApiKeys';
+import { simplifyChordArray, simplifySequenceCorrections } from '@/utils/chordSimplification';
+import type { UseChordPlaybackReturn } from '@/hooks/chord-playback/useChordPlayback';
+import {
+  DEFAULT_PIANO_VOLUME,
+  DEFAULT_GUITAR_VOLUME,
+  DEFAULT_VIOLIN_VOLUME,
+  DEFAULT_FLUTE_VOLUME,
+} from '@/config/audioDefaults';
+import { buildAnalyzePageUrl, type AnalyzeRouteParams } from '@/utils/analyzeRouteUtils';
+import { consumeAnalyzeSessionHandoff } from '@/utils/analyzeSessionHandoff';
+import {
+  MAX_ANALYSIS_DURATION_MINUTES,
+  getAnalysisDurationLimitReason,
+  parseAnalysisDurationSeconds,
+} from '@/utils/analysisDurationLimit';
+import { requestSheetSageTranscription } from '@/services/sheetsage/sheetSageTranscriptionClient';
+import { getCachedSheetSageMelody } from '@/services/sheetsage/sheetSageCacheClient';
+import { useFirebaseReadiness } from '@/hooks/firebase/useFirebaseReadiness';
+import { useYouTubeSetup } from '@/hooks/youtube/useYouTubeSetup';
+import { useSegmentationState } from '@/hooks/lyrics/useSegmentationState';
+import { useTabsAndEditing } from '@/hooks/ui/useTabsAndEditing';
+import { useLyricsState } from '@/hooks/lyrics/useLyricsState';
+import { useAnalysisStore } from '@/stores/analysisStore';
+import { useUIStore } from '@/stores/uiStore';
+import { useIsLoopEnabled, useLoopEndBeat, useLoopStartBeat, useIsPitchShiftEnabled, useIsPitchShiftReady } from '@/stores/uiStore';
+import { usePlaybackStore, useIsVideoMinimized } from '@/stores/playbackStore';
+import { getPitchShiftService } from '@/services/audio/pitchShiftServiceInstance';
+import { setYouTubePlayerMuted } from '@/utils/youtubePlayerAudio';
+import { useSheetSageBackendAvailability } from '@/hooks/sheetsage/useSheetSageBackendAvailability';
+import { useCachedSheetSageMelodyQuery } from '@/hooks/query/useSheetSageQueries';
+import { queryKeys } from '@/services/query/queryKeys';
+import { queryGcTimes, queryStaleTimes } from '@/services/query/queryOptions';
+import type { LyricsData } from '@/types/musicAiTypes';
+import type { AnalyzePageViewModel } from '../_types/analyzePageViewModel';
+import { useAnalyzePageStoreSync } from './useAnalyzePageStoreSync';
+import { useAnalyzePageLifecycleReset } from './useAnalyzePageLifecycleReset';
+import { shouldShowSnowEffect } from '@/utils/seasonalEffects';
+import { searchLyricsWithFallback, type LyricsServiceResponse } from '@/services/lyrics/lyricsService';
+import { resolveLyricsForChatbotContext } from '@/utils/chatbotLyrics';
+import type { LRCLibCandidate } from '@/services/lyrics/lrclibService';
+import type { BeatGridTimedLyrics } from '@/components/chord-analysis/GridLyricsRow';
+
+interface UseAnalyzePageViewModelParams {
+  videoId: string;
+  routeParams: Required<AnalyzeRouteParams>;
+}
+
+export function useAnalyzePageViewModel({
+  videoId,
+  routeParams,
+}: UseAnalyzePageViewModelParams): AnalyzePageViewModel {
+  const showSheetSage = true;
+  useSheetSageBackendAvailability(showSheetSage);
+  const queryClient = useQueryClient();
+  const router = useRouter();
+  const titleFromSearch = routeParams.title;
+  const durationFromSearch = routeParams.duration;
+  const channelFromSearch = routeParams.channel;
+  const thumbnailFromSearch = routeParams.thumbnail;
+  const autoStartRequested = Boolean(routeParams.autoStart);
+  const [isCompactViewport, setIsCompactViewport] = useState(false);
+  const durationLimitToastShownRef = useRef(false);
+  const cachePromptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cachePromptToastKeyRef = useRef<string | null>(null);
+  const cachePromptShownForRef = useRef<string | null>(null);
+  const [initialAnalyzeHandoff] = useState(() => consumeAnalyzeSessionHandoff(
+    videoId,
+    routeParams.beatModel,
+    routeParams.chordModel
+  ));
+  const shouldSkipInitialCacheBootstrap = Boolean(initialAnalyzeHandoff?.audioProcessingState?.audioUrl);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const mediaQuery = window.matchMedia('(max-width: 767px)');
+    const updateViewportMode = () => setIsCompactViewport(mediaQuery.matches);
+    updateViewportMode();
+    mediaQuery.addEventListener('change', updateViewportMode);
+
+    return () => mediaQuery.removeEventListener('change', updateViewportMode);
+  }, []);
+
+  const {
+    stage,
+    progress: _progress,
+    statusMessage,
+    setStage,
+    setProgress,
+    setStatusMessage,
+    startProcessing,
+    completeProcessing,
+    failProcessing,
+  } = useProcessing();
+  const { theme } = useTheme();
+  const { isServiceAvailable, getServiceMessage } = useApiKeys();
+
+  const {
+    state: audioProcessingState,
+    analysisResults,
+    videoTitle,
+    analyzeAudio: analyzeAudioFromService,
+    setState: setAudioProcessingState,
+    setAnalysisResults,
+    setVideoTitle,
+  } = useAudioProcessing(videoId, {
+    initialState: initialAnalyzeHandoff?.audioProcessingState ?? null,
+    initialAnalysisResults: initialAnalyzeHandoff?.analysisResults ?? null,
+    initialVideoTitle: initialAnalyzeHandoff?.videoTitle ?? titleFromSearch,
+  });
+
+  const [snowEnabled, setSnowEnabled] = useState(true);
+
+  // Determine eligibility based on video title or search title
+  const isSnowEligible = useMemo(() => {
+    return shouldShowSnowEffect(videoTitle || titleFromSearch || undefined);
+  }, [videoTitle, titleFromSearch]);
+
+  // Load snow toggle preference on client-side mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('snow-animation-enabled');
+      if (stored !== null) {
+        setSnowEnabled(stored === 'true');
+      }
+    }
+  }, []);
+
+  const handleToggleSnow = useCallback(() => {
+    setSnowEnabled(prev => {
+      const next = !prev;
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('snow-animation-enabled', String(next));
+      }
+      return next;
+    });
+  }, []);
+
+  const cachedSheetSageMelodyQuery = useCachedSheetSageMelodyQuery(
+    videoId,
+    showSheetSage && !!videoId && audioProcessingState.isExtracted && !!audioProcessingState.audioUrl,
+  );
+
+  const {
+    state: audioPlayerState,
+    audioRef,
+    youtubePlayer,
+    handleTimeUpdate: _handleTimeUpdate,
+    handleLoadedMetadata: _handleLoadedMetadata,
+    setState: setAudioPlayerState,
+    setYoutubePlayer,
+    setDuration,
+  } = useAudioPlayer();
+
+  useEffect(() => {
+    if (titleFromSearch && !videoTitle) {
+      setVideoTitle(titleFromSearch);
+    }
+  }, [titleFromSearch, videoTitle, setVideoTitle]);
+
+  const {
+    beatDetector,
+    chordDetector,
+    modelsInitialized,
+    beatDetectorRef,
+    chordDetectorRef,
+    setBeatDetector,
+    setChordDetector,
+  } = useModelState({
+    initialBeatDetector: routeParams.beatModel,
+    initialChordDetector: routeParams.chordModel,
+  });
+
+  const { firebaseReady } = useFirebaseReadiness();
+  const { isPlaying, currentTime, duration, playbackRate } = audioPlayerState;
+  const effectiveAnalysisDuration = duration > 0 ? duration : parseAnalysisDurationSeconds(durationFromSearch);
+
+  const setIsPlaying = useCallback((playing: boolean) => {
+    setAudioPlayerState(prev => ({ ...prev, isPlaying: playing }));
+  }, [setAudioPlayerState]);
+
+  const setCurrentTime = useCallback((time: number) => {
+    setAudioPlayerState(prev => ({ ...prev, currentTime: time }));
+  }, [setAudioPlayerState]);
+
+  const {
+    segmentationData,
+    showSegmentation,
+    isSegmenting,
+    segmentationError,
+    toggleSegmentation,
+    resetSegmentation,
+  } = useSegmentationState();
+
+  const simplifyChords = useUIStore((state) => state.simplifyChords);
+  const showRomanNumerals = useUIStore((state) => state.showRomanNumerals);
+  const updateRomanNumeralData = useUIStore((state) => state.updateRomanNumeralData);
+  const [showExtractionNotification, setShowExtractionNotification] = useState(false);
+
+  const {
+    lyrics,
+    showLyrics,
+    hasCachedLyrics,
+    isTranscribingLyrics,
+    lyricsError,
+    translatedLyrics,
+    setLyrics,
+    setShowLyrics,
+    setHasCachedLyrics,
+    setIsTranscribingLyrics,
+    setLyricsError,
+  } = useLyricsState();
+
+  const {
+    cacheAvailable,
+    cacheCheckCompleted,
+    cacheCheckInProgress,
+    hasPersistedActiveTranscription,
+    activeTranscriptionUsageCount,
+    incrementActiveTranscriptionUsageCount,
+    keySignature,
+    isDetectingKey,
+    chordCorrections,
+    showCorrectedChords,
+    setShowCorrectedChords,
+    sequenceCorrections,
+    handleAudioAnalysis,
+    extractAudioFromYouTube,
+  } = useAnalyzePageOrchestrator({
+    videoId,
+    titleFromSearch,
+    durationFromSearch,
+    channelFromSearch,
+    thumbnailFromSearch,
+    firebaseReady,
+    modelsInitialized,
+    beatDetector,
+    chordDetector,
+    beatDetectorRef,
+    chordDetectorRef,
+    audioRef,
+    audioProcessingState,
+    analysisResults,
+    lyrics,
+    showRomanNumerals,
+    setShowExtractionNotification,
+    setAudioProcessingState,
+    setAnalysisResults,
+    setDuration,
+    setVideoTitle,
+    setLyrics,
+    setShowLyrics,
+    setHasCachedLyrics,
+    stage,
+    setStage,
+    setProgress,
+    setStatusMessage,
+    startProcessing,
+    completeProcessing,
+    failProcessing,
+    updateRomanNumeralData,
+    analyzeAudioFromService,
+    skipInitialCacheBootstrap: shouldSkipInitialCacheBootstrap,
+  });
+
+  useAnalysisUsageTracker({
+    videoId,
+    beatDetector,
+    chordDetector,
+    isAnalyzed: audioProcessingState.isAnalyzed,
+    isPlaying,
+    duration,
+    hasPersistedTranscription: hasPersistedActiveTranscription,
+    onUsageCountIncrement: incrementActiveTranscriptionUsageCount,
+  });
+
+  const analysisDurationLimitReason = useMemo(
+    () => getAnalysisDurationLimitReason(effectiveAnalysisDuration),
+    [effectiveAnalysisDuration],
+  );
+  const analysisActionDisabledReason = !cacheAvailable ? analysisDurationLimitReason : null;
+
+  useEffect(() => {
+    return () => {
+      if (cachePromptTimerRef.current) {
+        clearTimeout(cachePromptTimerRef.current);
+        cachePromptTimerRef.current = null;
+      }
+      if (cachePromptToastKeyRef.current) {
+        closeToast(cachePromptToastKeyRef.current);
+        cachePromptToastKeyRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (analysisActionDisabledReason && !durationLimitToastShownRef.current) {
+      durationLimitToastShownRef.current = true;
+      addToast({
+        title: 'Audio is too long for analysis',
+        description: `Audio duration should be less than ${MAX_ANALYSIS_DURATION_MINUTES} minutes.`,
+        color: 'default',
+        timeout: 5000,
+        shouldShowTimeoutProgress: true,
+        classNames: mergeToastClassNames({
+          icon: 'text-warning-500',
+          title: 'text-warning-600 dark:text-warning-400',
+        }),
+      });
+      return;
+    }
+
+    if (!analysisActionDisabledReason) {
+      durationLimitToastShownRef.current = false;
+    }
+  }, [analysisActionDisabledReason]);
+
+  useEffect(() => {
+    const cachePromptId = `${videoId}:${beatDetector}:${chordDetector}`;
+    const shouldShowCachePrompt =
+      cacheCheckCompleted &&
+      cacheAvailable &&
+      !audioProcessingState.isAnalyzed &&
+      !audioProcessingState.isAnalyzing &&
+      !audioProcessingState.isExtracting &&
+      !audioProcessingState.error;
+
+    if (!shouldShowCachePrompt) {
+      if (cachePromptTimerRef.current) {
+        clearTimeout(cachePromptTimerRef.current);
+        cachePromptTimerRef.current = null;
+      }
+      if (cachePromptToastKeyRef.current) {
+        closeToast(cachePromptToastKeyRef.current);
+        cachePromptToastKeyRef.current = null;
+      }
+      return;
+    }
+
+    if (cachePromptToastKeyRef.current && cachePromptShownForRef.current !== cachePromptId) {
+      closeToast(cachePromptToastKeyRef.current);
+      cachePromptToastKeyRef.current = null;
+    }
+
+    if (cachePromptShownForRef.current === cachePromptId || cachePromptTimerRef.current) {
+      return;
+    }
+
+    cachePromptTimerRef.current = setTimeout(() => {
+      cachePromptTimerRef.current = null;
+      if (cachePromptShownForRef.current === cachePromptId) {
+        return;
+      }
+
+      cachePromptShownForRef.current = cachePromptId;
+      const key = addToast({
+        title: 'Cached Results Ready',
+        description: 'Click "Open cached results" to load the saved beat and chord grid.',
+        color: 'default',
+        timeout: 0,
+        shouldShowTimeoutProgress: false,
+        classNames: mergeToastClassNames({
+          icon: 'text-success-600 dark:text-success-400',
+          title: 'text-success-600 dark:text-success-400',
+        }),
+        onClose: () => {
+          cachePromptToastKeyRef.current = null;
+        },
+      });
+      cachePromptToastKeyRef.current = key;
+    }, 5_000);
+
+    return () => {
+      if (cachePromptTimerRef.current) {
+        clearTimeout(cachePromptTimerRef.current);
+        cachePromptTimerRef.current = null;
+      }
+    };
+  }, [
+    audioProcessingState.error,
+    audioProcessingState.isAnalyzed,
+    audioProcessingState.isAnalyzing,
+    audioProcessingState.isExtracting,
+    beatDetector,
+    cacheAvailable,
+    cacheCheckCompleted,
+    chordDetector,
+    videoId,
+  ]);
+
+  const handleStartAnalysis = useCallback(() => {
+    if (analysisActionDisabledReason) {
+      setAudioProcessingState(prev => ({
+        ...prev,
+        error: analysisActionDisabledReason,
+      }));
+      return;
+    }
+
+    void handleAudioAnalysis();
+  }, [analysisActionDisabledReason, handleAudioAnalysis, setAudioProcessingState]);
+
+  useEffect(() => {
+    if (initialAnalyzeHandoff?.duration) {
+      setDuration(initialAnalyzeHandoff.duration);
+    }
+  }, [initialAnalyzeHandoff, setDuration]);
+
+  const currentBeatModelParam = routeParams.beatModel;
+  const currentChordModelParam = routeParams.chordModel;
+  const shouldSyncModelParams = useMemo(() => (
+    Boolean(videoId)
+      && (
+        currentBeatModelParam !== beatDetector
+        || currentChordModelParam !== chordDetector
+      )
+  ), [beatDetector, chordDetector, currentBeatModelParam, currentChordModelParam, videoId]);
+
+  const canonicalAnalyzeUrl = useMemo(() => buildAnalyzePageUrl(videoId, {
+    ...routeParams,
+    beatModel: beatDetector,
+    chordModel: chordDetector,
+  }), [beatDetector, chordDetector, routeParams, videoId]);
+
+  const autoStartAttemptedRef = useRef(false);
+  const initialModelUrlSyncHandledRef = useRef(false);
+
+  const analyzeBackdropUrl = useMemo(() => {
+    if (thumbnailFromSearch) {
+      return thumbnailFromSearch;
+    }
+
+    return videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : null;
+  }, [thumbnailFromSearch, videoId]);
+
+  useEffect(() => {
+    if (!videoId || !modelsInitialized) {
+      return;
+    }
+
+    const isMissingModelParams = !currentBeatModelParam || !currentChordModelParam;
+
+    if (!initialModelUrlSyncHandledRef.current) {
+      initialModelUrlSyncHandledRef.current = true;
+
+      if (!isMissingModelParams) {
+        return;
+      }
+    }
+
+    if (!shouldSyncModelParams) {
+      return;
+    }
+
+    router.replace(canonicalAnalyzeUrl, { scroll: false });
+  }, [
+    canonicalAnalyzeUrl,
+    currentBeatModelParam,
+    currentChordModelParam,
+    modelsInitialized,
+    router,
+    shouldSyncModelParams,
+    videoId,
+  ]);
+
+  useEffect(() => {
+    if (!autoStartRequested) {
+      autoStartAttemptedRef.current = false;
+      return;
+    }
+
+    if (autoStartAttemptedRef.current) {
+      return;
+    }
+
+    if (
+      !modelsInitialized ||
+      !audioProcessingState.isExtracted ||
+      !audioProcessingState.audioUrl ||
+      audioProcessingState.isAnalyzing ||
+      audioProcessingState.isAnalyzed ||
+      !!audioProcessingState.error ||
+      !!analysisActionDisabledReason
+    ) {
+      return;
+    }
+
+    autoStartAttemptedRef.current = true;
+    handleStartAnalysis();
+  }, [
+    autoStartRequested,
+    audioProcessingState.audioUrl,
+    audioProcessingState.error,
+    audioProcessingState.isAnalyzed,
+    audioProcessingState.isAnalyzing,
+    audioProcessingState.isExtracted,
+    analysisActionDisabledReason,
+    handleStartAnalysis,
+    modelsInitialized,
+  ]);
+
+  const hideInitialAnalysisControls = autoStartRequested
+    && !analysisActionDisabledReason
+    && !audioProcessingState.error
+    && !audioProcessingState.isAnalyzed;
+
+  const memoizedChordCorrections = useMemo(() => chordCorrections, [chordCorrections]);
+  const memoizedSequenceCorrections = useMemo(() => sequenceCorrections, [sequenceCorrections]);
+
+  const simplifiedSequenceCorrections = useMemo(() => {
+    return simplifyChords
+      ? simplifySequenceCorrections(memoizedSequenceCorrections)
+      : memoizedSequenceCorrections;
+  }, [simplifyChords, memoizedSequenceCorrections]);
+
+  const isVideoMinimized = useIsVideoMinimized();
+  const setIsVideoMinimized = useCallback((updater: boolean | ((prev: boolean) => boolean)) => {
+    const store = usePlaybackStore.getState();
+    const nextVal = typeof updater === 'function' ? updater(store.isVideoMinimized) : updater;
+    store.setIsVideoMinimized(nextVal);
+  }, []);
+  const [isFollowModeEnabled, setIsFollowModeEnabled] = useState(true);
+  const {
+    handleTryAnotherVideo,
+    toggleVideoMinimization,
+    toggleFollowMode,
+  } = useNavigationHelpers({
+    setIsVideoMinimized,
+    setIsFollowModeEnabled,
+  });
+
+  const {
+    currentBeatIndex,
+    setCurrentBeatIndex,
+    currentBeatIndexRef,
+    currentDownbeatIndex,
+    setCurrentDownbeatIndex,
+    lastClickInfo,
+    setLastClickInfo,
+    globalSpeedAdjustment,
+    setGlobalSpeedAdjustment,
+    handleBeatClick,
+    handleYouTubeReady,
+    handleYouTubeProgress,
+  } = usePlaybackState({
+    audioRef,
+    youtubePlayer,
+    setYoutubePlayer,
+    audioPlayerState,
+    setAudioPlayerState,
+    setDuration,
+    isFollowModeEnabled,
+  });
+
+  const isLoopEnabled = useIsLoopEnabled();
+  const loopStartBeat = useLoopStartBeat();
+  const loopEndBeat = useLoopEndBeat();
+  const isPitchShiftEnabled = useIsPitchShiftEnabled();
+  const isPitchShiftReady = useIsPitchShiftReady();
+
+  const { toggleEnharmonicCorrection } = useAudioInteractions({
+    showCorrectedChords,
+    setShowCorrectedChords,
+  });
+
+  const [fontSize, setFontSize] = useState<number>(16);
+  const {
+    activeTab,
+    setActiveTab,
+    isEditMode,
+    editedTitle,
+    editedChords,
+    handleEditModeToggle,
+    handleTitleSave: handleTitleSaveFromHook,
+    handleTitleCancel,
+    handleTitleChange,
+    handleChordEdit,
+  } = useTabsAndEditing(videoTitle || '');
+
+  const sheetSageResult = useAnalysisStore((state) => state.sheetSageResult);
+  const isComputingSheetSage = useAnalysisStore((state) => state.isComputingSheetSage);
+  const sheetSageError = useAnalysisStore((state) => state.sheetSageError);
+  const isCheckingSheetSageBackend = useAnalysisStore((state) => state.isCheckingSheetSageBackend);
+  const isSheetSageBackendAvailable = useAnalysisStore((state) => state.isSheetSageBackendAvailable);
+  const sheetSageBackendError = useAnalysisStore((state) => state.sheetSageBackendError);
+  const isMelodicTranscriptionPlaybackEnabled = useUIStore((state) => state.isMelodicTranscriptionPlaybackEnabled);
+  const setIsMelodicTranscriptionPlaybackEnabled = useUIStore((state) => state.setIsMelodicTranscriptionPlaybackEnabled);
+
+  const [isChatbotOpen, setIsChatbotOpen] = useState(false);
+  const [isGridLyricsVisible, setIsGridLyricsVisible] = useState(false);
+  const [isLyricsSearchOpen, setIsLyricsSearchOpen] = useState(false);
+  const [lyricsSearchQuery, setLyricsSearchQuery] = useState(titleFromSearch || videoTitle || '');
+  const [lyricsSearchResult, setLyricsSearchResult] = useState<LyricsServiceResponse | null>(null);
+  const [isGridLyricsSearching, setIsGridLyricsSearching] = useState(false);
+  const [gridLyricsError, setGridLyricsError] = useState<string | null>(null);
+  const [appliedGridLyrics, setAppliedGridLyrics] = useState<{
+    timedLyrics?: BeatGridTimedLyrics;
+    plainLyrics?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!lyricsSearchQuery && (videoTitle || titleFromSearch)) {
+      setLyricsSearchQuery(videoTitle || titleFromSearch || '');
+    }
+  }, [lyricsSearchQuery, titleFromSearch, videoTitle]);
+
+  useEffect(() => {
+    const shouldMinimize = isChatbotOpen
+      || activeTab === 'guitarChords'
+      || activeTab === 'pianoVisualizer';
+    setIsVideoMinimized(shouldMinimize);
+  }, [isChatbotOpen, activeTab, setIsVideoMinimized]);
+
+  const hasSheetSageNotes = (sheetSageResult?.noteEvents?.length ?? 0) > 0;
+  const hasSheetSageAudioSource = Boolean(audioProcessingState.audioUrl);
+  const hasReadySheetSageBackend = isSheetSageBackendAvailable === true;
+  const melodicTranscriptionDisabledReason = isCheckingSheetSageBackend
+    ? 'Checking Sheet Sage backend...'
+    : !hasReadySheetSageBackend
+      ? (sheetSageBackendError || 'Sheet Sage backend unavailable.')
+      : !hasSheetSageAudioSource
+        ? 'Wait for extracted audio before computing melodic transcription.'
+        : undefined;
+
+  const splitLayoutHeight = useMemo(() => {
+    if (!isChatbotOpen) {
+      return 'calc(100vh - 180px)';
+    }
+
+    if (isCompactViewport) {
+      return 'calc(100vh - 180px - var(--mobile-video-dock-height, 0px) - 5.5rem)';
+    }
+
+    return 'calc(100vh - 180px - var(--mobile-video-dock-height, 0px))';
+  }, [isChatbotOpen, isCompactViewport]);
+
+  const handleTitleSave = useCallback(() => {
+    if (editedTitle.trim()) {
+      setVideoTitle(editedTitle.trim());
+    }
+    handleTitleSaveFromHook();
+  }, [editedTitle, setVideoTitle, handleTitleSaveFromHook]);
+
+  const handleChordEditWrapper = useCallback((index: number, newChord: string) => {
+    const originalChord = `chord_${index}`;
+    handleChordEdit(originalChord, newChord);
+  }, [handleChordEdit]);
+
+  useYouTubeSetup(videoId, setAudioProcessingState);
+
+  const visibleGridLyrics = isGridLyricsVisible ? appliedGridLyrics?.timedLyrics ?? null : null;
+  const visiblePlainLyrics = isGridLyricsVisible ? appliedGridLyrics?.plainLyrics ?? null : null;
+
+  const chatbotLyrics = useMemo(() => resolveLyricsForChatbotContext(
+    lyrics,
+    visibleGridLyrics?.lyrics,
+  ), [lyrics, visibleGridLyrics]);
+
+  const songContext = useMemo(() => ({
+    videoId,
+    title: videoTitle,
+    duration,
+    beats: analysisResults?.beats,
+    downbeats: analysisResults?.downbeats,
+    downbeats_with_measures: analysisResults?.downbeats_with_measures,
+    beats_with_positions: analysisResults?.beats_with_positions,
+    bpm: analysisResults?.beatDetectionResult?.bpm,
+    time_signature: analysisResults?.beatDetectionResult?.time_signature,
+    beatModel: analysisResults?.beatModel,
+    chords: analysisResults?.chords,
+    synchronizedChords: analysisResults?.synchronizedChords,
+    chordModel: analysisResults?.chordModel,
+    lyrics: chatbotLyrics,
+    translatedLyrics,
+    audioUrl: audioProcessingState.audioUrl || undefined,
+  }), [videoId, videoTitle, duration, analysisResults, chatbotLyrics, translatedLyrics, audioProcessingState.audioUrl]);
+
+  useEffect(() => {
+    resetSegmentation();
+  }, [videoId, resetSegmentation]);
+
+  useEffect(() => {
+    useAnalysisStore.getState().clearSheetSage();
+    setIsMelodicTranscriptionPlaybackEnabled(false);
+  }, [audioProcessingState.audioUrl, setIsMelodicTranscriptionPlaybackEnabled]);
+
+  useEffect(() => {
+    if (
+      !showSheetSage
+      || !videoId
+      || !audioProcessingState.isExtracted
+      || !audioProcessingState.audioUrl
+    ) {
+      return;
+    }
+
+    const analysisActions = useAnalysisStore.getState();
+    const cachedResult = cachedSheetSageMelodyQuery.data;
+
+    if (cachedResult) {
+      analysisActions.setSheetSageResult(cachedResult);
+      analysisActions.setSheetSageError(null);
+    }
+  }, [
+    audioProcessingState.audioUrl,
+    audioProcessingState.isExtracted,
+    cachedSheetSageMelodyQuery.data,
+    showSheetSage,
+    videoId,
+  ]);
+
+  useEffect(() => {
+    if (cachedSheetSageMelodyQuery.error) {
+      console.error('Failed to load cached melody transcription:', cachedSheetSageMelodyQuery.error);
+    }
+  }, [
+    cachedSheetSageMelodyQuery.error,
+  ]);
+
+  const segmentationDisabledReason = !songContext.audioUrl
+    ? 'Song segmentation becomes available after audio extraction finishes.'
+    : songContext.audioUrl.startsWith('blob:')
+      ? 'Song segmentation requires a backend-accessible extracted audio URL.'
+      : !songContext.beats?.length
+        ? 'Song segmentation becomes available after beat analysis finishes.'
+        : undefined;
+
+  const canAnalyzeSegmentation = !segmentationDisabledReason;
+
+  const handleSegmentationToggle = useCallback(() => {
+    void toggleSegmentation(songContext);
+  }, [toggleSegmentation, songContext]);
+
+  const toggleChatbot = useCallback(() => {
+    setIsChatbotOpen(!isChatbotOpen);
+  }, [isChatbotOpen]);
+
+  const applyLRCLibCandidate = useCallback((candidate: LRCLibCandidate) => {
+    if ((candidate.lyric_mode === 'word' || candidate.lyric_mode === 'line') && candidate.lyrics) {
+      setAppliedGridLyrics({
+        timedLyrics: {
+          mode: candidate.lyric_mode,
+          lyrics: candidate.lyrics,
+        },
+      });
+      setIsGridLyricsVisible(true);
+      setIsLyricsSearchOpen(false);
+      return;
+    }
+
+    if (candidate.plain_lyrics) {
+      setAppliedGridLyrics({ plainLyrics: candidate.plain_lyrics });
+      setIsGridLyricsVisible(true);
+      setIsLyricsSearchOpen(false);
+    }
+  }, []);
+
+  const runLRCLibLyricsSearch = useCallback(async (queryOverride?: string) => {
+    const query = (queryOverride ?? lyricsSearchQuery).trim() || (videoTitle || titleFromSearch || '').trim();
+    if (!query) return;
+
+    setLyricsSearchQuery(query);
+    setIsLyricsSearchOpen(true);
+    setIsGridLyricsSearching(true);
+    setGridLyricsError(null);
+
+    const expectedDuration = duration > 0
+      ? duration
+      : parseAnalysisDurationSeconds(durationFromSearch);
+
+    try {
+      const result = await searchLyricsWithFallback({
+        search_query: query,
+        duration: expectedDuration || undefined,
+        prefer_synchronized: true,
+      });
+
+      setLyricsSearchResult(result);
+      if (!result.success) {
+        setGridLyricsError(result.error || 'No lyrics found on LRCLIB.');
+        return;
+      }
+
+      if (
+        result.confidence === 'high'
+        && (result.lyric_mode === 'word' || result.lyric_mode === 'line')
+        && result.lyrics
+      ) {
+        setAppliedGridLyrics({
+          timedLyrics: {
+            mode: result.lyric_mode,
+            lyrics: result.lyrics,
+          },
+        });
+        setIsGridLyricsVisible(true);
+      }
+    } catch (error) {
+      setGridLyricsError(error instanceof Error ? error.message : 'Failed to search LRCLIB.');
+    } finally {
+      setIsGridLyricsSearching(false);
+    }
+  }, [duration, durationFromSearch, lyricsSearchQuery, titleFromSearch, videoTitle]);
+
+  const toggleLyricsPanel = useCallback(() => {
+    if (isGridLyricsVisible) {
+      setIsGridLyricsVisible(false);
+      setIsLyricsSearchOpen(false);
+      return;
+    }
+
+    if (isLyricsSearchOpen) {
+      setIsLyricsSearchOpen(false);
+      return;
+    }
+
+    setIsGridLyricsVisible(Boolean(appliedGridLyrics));
+    setIsLyricsSearchOpen(true);
+    if (!lyricsSearchResult && !isGridLyricsSearching) {
+      void runLRCLibLyricsSearch(videoTitle || titleFromSearch || lyricsSearchQuery);
+    }
+  }, [
+    appliedGridLyrics,
+    isGridLyricsSearching,
+    isGridLyricsVisible,
+    isLyricsSearchOpen,
+    lyricsSearchQuery,
+    lyricsSearchResult,
+    runLRCLibLyricsSearch,
+    titleFromSearch,
+    videoTitle,
+  ]);
+
+  useEffect(() => {
+    if (appliedGridLyrics?.timedLyrics?.mode === 'line') {
+      addToast({
+        title: 'Line-Synced Lyrics Loaded',
+        description: 'Word highlight is estimated because word-level timings are unavailable.',
+        color: 'default',
+        timeout: 18000,
+        shouldShowTimeoutProgress: true,
+        classNames: mergeToastClassNames({
+          icon: 'text-blue-500',
+          title: 'text-blue-600 dark:text-blue-400',
+        }),
+      });
+    }
+  }, [appliedGridLyrics]);
+
+  const updateCachedLyricsQuery = useCallback((lyricsData: LyricsData) => {
+    const audioUrl = audioProcessingState.audioUrl || '';
+    if (!videoId || !audioUrl) {
+      return;
+    }
+
+    queryClient.setQueryData(queryKeys.lyrics.cached(videoId, audioUrl), lyricsData);
+  }, [audioProcessingState.audioUrl, queryClient, videoId]);
+
+  const transcribeLyricsWithAI = useCallback(async () => {
+    if (!isServiceAvailable('musicAi')) {
+      setLyricsError(getServiceMessage('musicAi'));
+      return;
+    }
+
+    const deps = {
+      setAudioProcessingState: (updater: (prev: any) => any) => setAudioProcessingState(updater),
+      setAnalysisResults: () => {},
+      setDuration: () => {},
+      setShowExtractionNotification,
+      setLyrics,
+      setShowLyrics,
+      setHasCachedLyrics,
+      setActiveTab,
+      setIsTranscribingLyrics,
+      setLyricsError,
+      processingContext: {
+        stage: '',
+        progress: 0,
+        setStage: () => {},
+        setProgress: () => {},
+        setStatusMessage: () => {},
+        startProcessing: () => {},
+        completeProcessing: () => {},
+        failProcessing: () => {},
+      },
+      analyzeAudioFromService: () => Promise.resolve({} as any),
+      audioRef,
+      beatDetectorRef,
+      chordDetectorRef,
+      videoId,
+      titleFromSearch,
+      durationFromSearch,
+      channelFromSearch,
+      thumbnailFromSearch,
+      audioProcessingState: {
+        ...audioProcessingState,
+        audioUrl: audioProcessingState.audioUrl || null,
+      },
+      beatDetector,
+      chordDetector,
+      progress: 0,
+      lyrics,
+      onLyricsTranscribed: updateCachedLyricsQuery,
+    };
+
+    return await transcribeLyricsWithAIService(deps as any);
+  }, [
+    audioProcessingState,
+    audioRef,
+    beatDetector,
+    beatDetectorRef,
+    channelFromSearch,
+    chordDetector,
+    chordDetectorRef,
+    durationFromSearch,
+    getServiceMessage,
+    isServiceAvailable,
+    lyrics,
+    setActiveTab,
+    setAudioProcessingState,
+    setHasCachedLyrics,
+    setIsTranscribingLyrics,
+    setLyrics,
+    setLyricsError,
+    setShowLyrics,
+    thumbnailFromSearch,
+    titleFromSearch,
+    updateCachedLyricsQuery,
+    videoId,
+  ]);
+
+  const chordGridData = useMemo(() => getChordGridDataService(analysisResults as any) as any, [analysisResults]);
+
+  const simplifiedChordGridData = useMemo(() => {
+    if (!chordGridData) return chordGridData;
+
+    let processedChords = chordGridData.chords || [];
+
+    if (simplifyChords) {
+      processedChords = simplifyChordArray(processedChords);
+    }
+
+    return {
+      ...chordGridData,
+      chords: processedChords,
+    };
+  }, [chordGridData, simplifyChords]);
+
+  useLoopPlayback({
+    youtubePlayer,
+    beats: simplifiedChordGridData?.beats || [],
+    currentTime,
+    duration,
+    setLastClickInfo,
+  });
+
+  const [chordPlayback, setChordPlayback] = useState<UseChordPlaybackReturn>({
+    isEnabled: false,
+    pianoVolume: DEFAULT_PIANO_VOLUME,
+    guitarVolume: DEFAULT_GUITAR_VOLUME,
+    violinVolume: DEFAULT_VIOLIN_VOLUME,
+    fluteVolume: DEFAULT_FLUTE_VOLUME,
+    isReady: false,
+    togglePlayback: () => {},
+    setPianoVolume: () => {},
+    setGuitarVolume: () => {},
+    setViolinVolume: () => {},
+    setFluteVolume: () => {},
+  });
+
+  const handleChordPlaybackChange = useCallback((newChordPlayback: UseChordPlaybackReturn) => {
+    setChordPlayback(newChordPlayback);
+  }, []);
+
+  const toggleMelodicTranscriptionPlayback = useCallback(async () => {
+    if (!hasSheetSageAudioSource || isComputingSheetSage) {
+      return;
+    }
+
+    const analysisActions = useAnalysisStore.getState();
+
+    if (isMelodicTranscriptionPlaybackEnabled) {
+      setIsMelodicTranscriptionPlaybackEnabled(false);
+      return;
+    }
+
+    if (!hasSheetSageNotes) {
+      if (!hasReadySheetSageBackend) {
+        analysisActions.setSheetSageError(sheetSageBackendError || 'Sheet Sage backend unavailable.');
+        return;
+      }
+
+      analysisActions.setIsComputingSheetSage(true);
+      analysisActions.setSheetSageError(null);
+
+      try {
+        const cachedResult = cachedSheetSageMelodyQuery.data ?? await queryClient.fetchQuery({
+          queryKey: queryKeys.sheetSage.cachedMelody(videoId),
+          queryFn: () => getCachedSheetSageMelody(videoId),
+          staleTime: queryStaleTimes.cachedMelody,
+          gcTime: queryGcTimes.cachedMelody,
+        });
+        const result = cachedResult ?? await requestSheetSageTranscription(null, audioProcessingState.audioUrl || null, videoId);
+        analysisActions.setSheetSageResult(result);
+        analysisActions.setSheetSageError(null);
+        queryClient.setQueryData(queryKeys.sheetSage.cachedMelody(videoId), result);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'Unknown Sheet Sage error';
+        analysisActions.setSheetSageError(message);
+        analysisActions.setIsComputingSheetSage(false);
+        return;
+      } finally {
+        analysisActions.setIsComputingSheetSage(false);
+      }
+    }
+
+    setActiveTab('pianoVisualizer');
+    setIsMelodicTranscriptionPlaybackEnabled(true);
+  }, [
+    audioProcessingState.audioUrl,
+    cachedSheetSageMelodyQuery.data,
+    hasReadySheetSageBackend,
+    hasSheetSageAudioSource,
+    hasSheetSageNotes,
+    isComputingSheetSage,
+    isMelodicTranscriptionPlaybackEnabled,
+    queryClient,
+    setActiveTab,
+    setIsMelodicTranscriptionPlaybackEnabled,
+    sheetSageBackendError,
+    videoId,
+  ]);
+
+  useMelodicTranscriptionPlayback({
+    sheetSageResult,
+    audioUrl: audioProcessingState.audioUrl || null,
+    segmentationData,
+    audioRef,
+    youtubePlayer,
+    currentTime,
+    isPlaying,
+    isEnabled: isMelodicTranscriptionPlaybackEnabled,
+  });
+
+  const [isCountdownEnabled, setIsCountdownEnabled] = useState<boolean>(false);
+  const [isCountingDown, setIsCountingDown] = useState<boolean>(false);
+  const [countdownDisplay, setCountdownDisplay] = useState<string>('');
+  const [isMetronomeEnabled, setIsMetronomeEnabled] = useState<boolean>(false);
+
+  const timeSignature = analysisResults?.beatDetectionResult?.time_signature || 4;
+  const bpm = analysisResults?.beatDetectionResult?.bpm || 120;
+  const countdownCtrlRef = useRef<{ intervalId: ReturnType<typeof setInterval> | null; aborted: boolean; token: number } | null>(null);
+  const countdownStateRef = useRef<{ inProgress: boolean; completed: boolean }>({ inProgress: false, completed: false });
+
+  const cancelCountdown = useCallback(() => {
+    const ctrl = countdownCtrlRef.current;
+    if (ctrl) {
+      ctrl.aborted = true;
+      if (ctrl.intervalId) clearInterval(ctrl.intervalId as any);
+      countdownCtrlRef.current = null;
+    }
+    countdownStateRef.current.inProgress = false;
+    setIsCountingDown(false);
+    setCountdownDisplay('');
+  }, []);
+
+  const runCountdown = useCallback(async () => {
+    if (!isCountdownEnabled) return true;
+    if (countdownStateRef.current.inProgress) return false;
+
+    const beatsPerMeasure = Math.max(2, Math.min(12, timeSignature || 4));
+    const beatDurationSec = 60 / Math.max(1, bpm || 120);
+    const totalMs = beatsPerMeasure * beatDurationSec * 1000;
+
+    setIsCountingDown(true);
+    const start = Date.now();
+    const token = Math.random();
+    const ctrl = { intervalId: null as ReturnType<typeof setInterval> | null, aborted: false, token };
+    countdownCtrlRef.current = ctrl;
+    countdownStateRef.current.inProgress = true;
+    countdownStateRef.current.completed = false;
+    try { (youtubePlayer as any)?.pauseVideo?.(); } catch {}
+    setCountdownDisplay(`${beatsPerMeasure}`);
+
+    const ok = await new Promise<boolean>((resolve) => {
+      ctrl.intervalId = setInterval(() => {
+        if (!countdownCtrlRef.current || countdownCtrlRef.current.token !== token || countdownCtrlRef.current.aborted) {
+          if (ctrl.intervalId) clearInterval(ctrl.intervalId as any);
+          countdownStateRef.current.inProgress = false;
+          setIsCountingDown(false);
+          setCountdownDisplay('');
+          resolve(false);
+          return;
+        }
+
+        const elapsed = Date.now() - start;
+        const remaining = Math.max(0, totalMs - elapsed);
+        const remainingBeats = Math.ceil(remaining / (beatDurationSec * 1000));
+        setCountdownDisplay(`${remainingBeats}`);
+        if (remaining <= 0) {
+          if (ctrl.intervalId) clearInterval(ctrl.intervalId as any);
+          countdownCtrlRef.current = null;
+          countdownStateRef.current.inProgress = false;
+          countdownStateRef.current.completed = true;
+          setIsCountingDown(false);
+          setCountdownDisplay('');
+          resolve(true);
+        }
+      }, 100);
+    });
+
+    return ok;
+  }, [isCountdownEnabled, timeSignature, bpm, youtubePlayer]);
+
+  const disableMetronomeService = useCallback(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    void metronomeService.setEnabled(false);
+  }, []);
+
+  useAnalyzePageLifecycleReset({
+    videoId,
+    resetSegmentation,
+    setIsMelodicTranscriptionPlaybackEnabled,
+    setIsFollowModeEnabled,
+    setIsCountdownEnabled,
+    cancelCountdown,
+    countdownStateRef,
+    chordPlayback,
+    setIsMetronomeEnabled,
+    disableMetronomeService,
+  });
+
+  useEffect(() => {
+    if (!isPlaying) {
+      cancelCountdown();
+      countdownStateRef.current.completed = false;
+      countdownStateRef.current.inProgress = false;
+    }
+  }, [isPlaying, cancelCountdown]);
+
+  useEffect(() => {
+    return () => {
+      cancelCountdown();
+    };
+  }, [cancelCountdown]);
+
+  const toggleCountdown = useCallback(() => {
+    setIsCountdownEnabled(prev => !prev);
+  }, []);
+
+  useScrollAndAnimation({
+    youtubePlayer,
+    isPlaying,
+    currentTime,
+    playbackRate,
+    analysisResults,
+    currentBeatIndex,
+    currentBeatIndexRef,
+    setCurrentBeatIndex,
+    setCurrentDownbeatIndex,
+    setCurrentTime,
+    isFollowModeEnabled,
+    chordGridData,
+    globalSpeedAdjustment,
+    setGlobalSpeedAdjustment,
+    lastClickInfo,
+  });
+
+  const { toggleMetronomeWithSync } = useMetronomeSync({
+    currentBeatIndex,
+    chordGridBeats: chordGridData.beats || [],
+    currentTime,
+    isPlaying,
+    timeSignature: analysisResults?.beatDetectionResult?.time_signature || 4,
+  });
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setIsMetronomeEnabled(metronomeService.isMetronomeEnabled());
+    }
+  }, []);
+
+  const handleMetronomeToggle = useCallback(async (): Promise<boolean> => {
+    const newEnabled = await toggleMetronomeWithSync();
+    setIsMetronomeEnabled(newEnabled);
+    return newEnabled;
+  }, [toggleMetronomeWithSync]);
+
+  // PITCH-SHIFT AWARE: Only unmute YouTube when pitch-shift is OFF.
+  // When pitch-shift is ON, the pitch-shift toggle effect in usePitchShiftAudio
+  // owns muting (mutes YouTube + audio element). If we unconditionally unmute
+  // YouTube here on youtubePlayer load, we override the pitch-shift mute and
+  // the user hears BOTH the YouTube source audio AND the Firebase pitch-shifted
+  // audio simultaneously — which also creates a perceived timing mismatch.
+  useEffect(() => {
+    if (youtubePlayer) {
+      setYouTubePlayerMuted(youtubePlayer, isPitchShiftEnabled);
+    }
+    if (audioRef.current) {
+      audioRef.current.muted = true;
+    }
+  }, [youtubePlayer, audioRef, isPitchShiftEnabled]);
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.playbackRate = playbackRate;
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`🎵 Synced audio element playback rate to ${playbackRate}x`);
+      }
+    }
+  }, [playbackRate, audioRef]);
+
+  const handleDismissExtraction = useCallback(() => {
+    setShowExtractionNotification(false);
+  }, []);
+
+  const handleRefreshExtraction = useCallback(() => {
+    extractAudioFromYouTube(true);
+  }, [extractAudioFromYouTube]);
+
+  useEffect(() => {
+    const playbackStore = usePlaybackStore.getState();
+    playbackStore.setBeatClickHandler(handleBeatClick);
+
+    return () => {
+      usePlaybackStore.getState().setBeatClickHandler(null);
+    };
+  }, [handleBeatClick]);
+
+  useAnalyzePageStoreSync({
+    analysisResults,
+    audioProcessingState,
+    cacheAvailable,
+    cacheCheckCompleted,
+    cacheCheckInProgress,
+    keySignature,
+    isDetectingKey,
+    chordCorrections,
+    showCorrectedChords,
+    beatDetector,
+    chordDetector,
+    modelsInitialized,
+    lyrics,
+    showLyrics,
+    hasCachedLyrics,
+    isTranscribingLyrics,
+    lyricsError,
+    videoTitle,
+    showSegmentation,
+    isChatbotOpen,
+    isLyricsPanelOpen: false,
+    isPlaying,
+    currentTime,
+    duration,
+    playbackRate,
+    youtubePlayer,
+    audioRef,
+    isVideoMinimized,
+    isFollowModeEnabled,
+  });
+
+  const hasCorrections = Boolean(
+    (memoizedChordCorrections !== null && Object.keys(memoizedChordCorrections).length > 0)
+    || (memoizedSequenceCorrections !== null && memoizedSequenceCorrections.correctedSequence.length > 0)
+  );
+
+  const melodicTranscriptionPlaybackConfig = showSheetSage ? {
+    isEnabled: isMelodicTranscriptionPlaybackEnabled,
+    hasTranscription: hasSheetSageNotes,
+    isLoading: isComputingSheetSage || (isCheckingSheetSageBackend && !hasSheetSageNotes),
+    disabled: !hasSheetSageAudioSource,
+    disabledReason: melodicTranscriptionDisabledReason,
+    errorMessage: sheetSageBackendError || sheetSageError,
+    canAdjustVolume: hasSheetSageNotes,
+    togglePlayback: toggleMelodicTranscriptionPlayback,
+  } : undefined;
+
+  const controlsProps = {
+    isExtracted: audioProcessingState.isExtracted,
+    isAnalyzed: audioProcessingState.isAnalyzed,
+    isAnalyzing: audioProcessingState.isAnalyzing,
+    hasError: !!audioProcessingState.error,
+    stage,
+    beatDetector,
+    chordDetector,
+    onBeatDetectorChange: setBeatDetector,
+    onChordDetectorChange: setChordDetector,
+    onStartAnalysis: handleStartAnalysis,
+    cacheAvailable,
+    cacheCheckCompleted,
+    actionDisabledReason: analysisActionDisabledReason,
+    hidden: hideInitialAnalysisControls,
+  };
+
+  const resultsPaneProps = {
+    analysisResults,
+    isExtracted: audioProcessingState.isExtracted,
+    isAnalyzed: audioProcessingState.isAnalyzed,
+    isAnalyzing: audioProcessingState.isAnalyzing,
+    isExtracting: audioProcessingState.isExtracting,
+    isDownloading: audioProcessingState.isDownloading,
+    fromCache: audioProcessingState.fromCache,
+    hasCachedAnalysis: cacheAvailable,
+    queueStatus: audioProcessingState.queueStatus,
+    queuePosition: audioProcessingState.queuePosition,
+    estimatedWaitSeconds: audioProcessingState.estimatedWaitSeconds,
+    statusMessage,
+    videoTitle,
+    isEditMode,
+    editedTitle,
+    onTitleChange: handleTitleChange,
+    onEditToggle: handleEditModeToggle,
+    onTitleSave: handleTitleSave,
+    onTitleCancel: handleTitleCancel,
+    showCorrectedChords,
+    hasCorrections,
+    toggleEnharmonicCorrection,
+    isTranscribingLyrics,
+    hasCachedLyrics,
+    canTranscribe: isServiceAvailable('musicAi') && !!audioProcessingState.audioUrl,
+    transcribeLyricsWithAI,
+    lyricsError,
+    activeTab,
+    setActiveTab,
+    showLyrics,
+    lyrics,
+    currentTime,
+    fontSize,
+    onFontSizeChange: setFontSize,
+    theme,
+    segmentationData,
+    sequenceCorrections: simplifiedSequenceCorrections,
+    chordGridData: simplifiedChordGridData,
+    isChatbotOpen,
+    isLyricsPanelOpen: false,
+    gridLyrics: visibleGridLyrics,
+    plainLyrics: visiblePlainLyrics,
+    editedChords,
+    onChordEdit: handleChordEditWrapper,
+    keySignature,
+    currentBeatIndex,
+    isPlaying,
+    isChordPlaybackEnabled: chordPlayback.isEnabled,
+    audioUrl: audioProcessingState.audioUrl || null,
+    sheetSageResult,
+    showMelodicOverlay: isMelodicTranscriptionPlaybackEnabled && hasSheetSageNotes,
+    duration,
+    activeTranscriptionUsageCount,
+    currentDownbeatIndex,
+    isSnowEligible,
+    snowEnabled,
+    onToggleSnow: handleToggleSnow,
+  };
+
+  const sidePanelsProps = {
+    isChatbotOpen,
+    closeChatbot: () => setIsChatbotOpen(false),
+    songContext,
+  };
+
+  const floatingDockProps = {
+    analysisResults,
+    isVideoMinimized,
+    isChatbotOpen,
+    isLyricsPanelOpen: false,
+    videoPlayerProps: {
+      isChatbotOpen,
+      isLyricsPanelOpen: false,
+      isVideoMinimized,
+      isFollowModeEnabled,
+      analysisResults: analysisResults as any,
+      currentBeatIndex,
+      chords: simplifiedChordGridData?.chords || [],
+      beats: simplifiedChordGridData?.beats || [],
+      segmentationData,
+      toggleVideoMinimization,
+      toggleFollowMode,
+      toggleMetronomeWithSync: handleMetronomeToggle,
+      videoId,
+      isPlaying,
+      playbackRate,
+      currentTime,
+      duration,
+      onReady: handleYouTubeReady,
+      onPlay: async () => {
+        if (isCountdownEnabled && !isPlaying && !countdownStateRef.current.inProgress && !countdownStateRef.current.completed) {
+          try { (youtubePlayer as any)?.pauseVideo?.(); } catch {}
+          const ok = await runCountdown();
+          if (ok) {
+            countdownStateRef.current.completed = false;
+            try { (youtubePlayer as any)?.playVideo?.(); } catch {}
+            setIsPlaying(true);
+            youtubeMasterClock.onPlay();
+          }
+          return;
+        }
+        setIsPlaying(true);
+        youtubeMasterClock.onPlay();
+      },
+      onPause: () => {
+        setIsPlaying(false);
+        youtubeMasterClock.onPause();
+      },
+      onProgress: handleYouTubeProgress,
+      onSeek: (time: number) => {
+        // CLOCK AUTHORITY (post-unification): the YouTube scrubber is a
+        // user-initiated seek — route it through the master clock, which
+        // raises the store fence (R2), bumps the seek token (R3), and
+        // publishes the new position. The YouTube iframe is still the
+        // primary controller, so we also call `seekTo` so the iframe's own
+        // timeline lands at the requested position.
+        //
+        // CRITICAL: we MUST immediately seek the GrainPlayer here, mirroring
+        // the grid-click path in `usePlaybackState.handleBeatClick`. The
+        // slave re-anchor loop in `usePitchShiftAudio` CANNOT be relied upon
+        // to catch up on its own because `youtubeMasterClock.anchorTo`
+        // invokes the re-anchor listener which calls
+        // `grainPlayerPitchShiftService.syncAnchor`, and that method
+        // overwrites the service's reported `_currentTime` to match the
+        // new master position. The slave loop's drift check
+        // (`|serviceState.currentTime - masterPos|`) therefore reads ≈ 0
+        // and NEVER fires `service.seek(masterPos)` — meaning the actual
+        // audio buffer position stays at the pre-scrub location while the
+        // beat grid and YouTube iframe both jump forward. Calling
+        // `service.seek` here is the only path that actually relocates
+        // the GrainPlayer buffer cursor to the new timestamp.
+        youtubeMasterClock.onUserSeek(time);
+        if (isPitchShiftEnabled && isPitchShiftReady) {
+          try {
+            getPitchShiftService()?.seek(time);
+          } catch {}
+        }
+        if (youtubePlayer && youtubePlayer.seekTo) {
+          youtubePlayer.seekTo(time, 'seconds');
+        }
+      },
+      onEnded: () => {
+        if (!isLoopEnabled) {
+          setIsPlaying(false);
+          youtubeMasterClock.onPause();
+          return;
+        }
+        const beats = simplifiedChordGridData?.beats || [];
+        const resolvedLoopRange = resolveLoopRange(beats, loopStartBeat, loopEndBeat, duration);
+        if (!resolvedLoopRange) return;
+        const startTimestamp = resolvedLoopRange.startTimestamp;
+        // CLOCK AUTHORITY: programmatic loop-wrap is a seek — route through
+        // the master clock so the fence + seek token + position publish all
+        // happen atomically.
+        youtubeMasterClock.onUserSeek(startTimestamp);
+        try { (youtubePlayer as any)?.seekTo?.(startTimestamp, 'seconds'); } catch {}
+        setLastClickInfo({ visualIndex: resolvedLoopRange.resolvedStartBeat, timestamp: startTimestamp, clickTime: Date.now() });
+        try { (youtubePlayer as any)?.playVideo?.(); } catch {}
+        setIsPlaying(true);
+        youtubeMasterClock.onPlay();
+      },
+      youtubeEmbedUrl: audioProcessingState.youtubeEmbedUrl,
+      videoUrl: audioProcessingState.videoUrl,
+      youtubePlayer,
+      youtubeMuted: isPitchShiftEnabled,
+      melodicTranscriptionPlayback: melodicTranscriptionPlaybackConfig,
+      showTopToggles: true as const,
+      positionMode: 'relative' as const,
+      timeSignature,
+      isCountdownEnabled,
+      isCountingDown,
+      countdownDisplay,
+      onRequestCountdown: async () => await runCountdown(),
+      // UNIFIED CLOCK: when the user changes rate via YouTube's native
+      // gear-menu inside the iframe, we receive the new rate here and
+      // fan it out to master clock + GrainPlayer + store via the same
+      // path the app's own rate slider uses. Without this, those
+      // components retain the old rate and extrapolation drift ensues.
+      onPlaybackRateChange: (rate: number) => {
+        setAudioPlayerState(prev => ({ ...prev, playbackRate: rate }));
+        try {
+          usePlaybackStore.getState().setPlayerPlaybackRate(rate);
+        } catch (error) {
+          console.warn('onPlaybackRateChange fan-out failed:', error);
+        }
+      },
+    },
+  };
+
+  // STABLE CALLBACK: Wrapping setPlaybackRate in useCallback prevents the
+  // function identity from changing on every viewModel render. Without this,
+  // UtilityBar's memo() breaks on every YouTube progress event (~4×/sec),
+  // cascading re-renders into PitchShiftPopover and causing slider jitter
+  // during drags. setAudioPlayerState is stable (useState setter).
+  const stableSetPlaybackRate = useCallback((rate: number) => {
+    setAudioPlayerState(prev => ({ ...prev, playbackRate: rate }));
+    try {
+      usePlaybackStore.getState().setPlayerPlaybackRate(rate);
+    } catch (error) {
+      console.warn('setPlayerPlaybackRate fan-out failed:', error);
+    }
+  }, [setAudioPlayerState]);
+
+  const utilityBarProps = {
+    isFollowModeEnabled,
+    chordPlayback,
+    melodicTranscriptionPlayback: melodicTranscriptionPlaybackConfig,
+    youtubePlayer,
+    playbackRate,
+    setPlaybackRate: stableSetPlaybackRate,
+    toggleFollowMode,
+    isCountdownEnabled,
+    isCountingDown,
+    countdownDisplay,
+    toggleCountdown,
+    isChatbotOpen,
+    isLyricsPanelOpen: isGridLyricsVisible || isLyricsSearchOpen || isGridLyricsSearching,
+    toggleChatbot,
+    toggleLyricsPanel,
+    lyricsSearchPopover: {
+      isOpen: isLyricsSearchOpen,
+      query: lyricsSearchQuery,
+      isLoading: isGridLyricsSearching,
+      error: gridLyricsError,
+      result: lyricsSearchResult,
+      onQueryChange: setLyricsSearchQuery,
+      onClose: () => setIsLyricsSearchOpen(false),
+      onSearch: () => void runLRCLibLyricsSearch(),
+      onApplyCandidate: applyLRCLibCandidate,
+    },
+    segmentation: {
+      isVisible: showSegmentation && !!segmentationData,
+      hasData: !!segmentationData,
+      isLoading: isSegmenting,
+      disabled: !canAnalyzeSegmentation && !segmentationData,
+      disabledReason: !segmentationData ? segmentationDisabledReason : undefined,
+      errorMessage: segmentationError,
+      onToggle: handleSegmentationToggle,
+    },
+    metronome: {
+      isEnabled: isMetronomeEnabled,
+      toggleMetronomeWithSync: handleMetronomeToggle,
+    },
+    totalBeats: simplifiedChordGridData?.beats?.length || 0,
+  };
+
+  const chromeProps = {
+    analyzeBackdropUrl,
+    showFooterTransition: Boolean(analysisResults),
+    videoTitle: videoTitle || undefined,
+    showSnow: isSnowEligible && snowEnabled,
+    processingBannersProps: {
+      isDownloading: audioProcessingState.isDownloading,
+      fromCache: audioProcessingState.fromCache,
+      queueStatus: audioProcessingState.queueStatus,
+      queuePosition: audioProcessingState.queuePosition,
+      estimatedWaitSeconds: audioProcessingState.estimatedWaitSeconds,
+      showExtractionNotification,
+      onDismissExtraction: handleDismissExtraction,
+      onRefreshExtraction: handleRefreshExtraction,
+      analysisResults,
+      audioDuration: duration,
+      audioUrl: audioProcessingState.audioUrl || undefined,
+      fromFirestoreCache: audioProcessingState.fromFirestoreCache,
+      videoId,
+      beatDetector,
+      error: audioProcessingState.error || null,
+      suggestion: audioProcessingState.suggestion || undefined,
+      onTryAnotherVideo: handleTryAnotherVideo,
+      onRetry: () => extractAudioFromYouTube(false),
+    },
+    melodyToastProps: {
+      isComputing: isComputingSheetSage,
+      durationSeconds: duration || (durationFromSearch ? Number(durationFromSearch) : 0),
+      hasResult: hasSheetSageNotes,
+      errorMessage: sheetSageError,
+    },
+    playbackPromptToastProps: {
+      promptId: videoId,
+      isAnalyzed: audioProcessingState.isAnalyzed,
+      isPlaying,
+    },
+  };
+
+  return {
+    audioRef,
+    audioPlayerState,
+    setAudioPlayerState,
+    setIsPlaying,
+    setCurrentTime,
+    youtubePlayer,
+    analysisResults,
+    keySignature,
+    currentBeatIndex,
+    chordGridData,
+    segmentationData,
+    audioUrl: audioProcessingState.audioUrl || null,
+    bpm,
+    timeSignature,
+    chordPlayback,
+    handleChordPlaybackChange,
+    splitLayoutHeight,
+    chromeProps,
+    controlsProps,
+    resultsPaneProps,
+    sidePanelsProps,
+    floatingDockProps,
+    utilityBarProps,
+  };
+}
