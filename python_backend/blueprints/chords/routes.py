@@ -52,7 +52,6 @@ def recognize_chords():
     - detector: Model to use ('chord-cnn-lstm', 'btc-sl', 'btc-pl', 'auto')
     - chord_dict: Optional chord dictionary to use
     - force: Force use of detector even if file is large
-    - use_spleeter: Use Spleeter for audio separation
 
     Returns:
     - JSON with chord recognition results
@@ -103,8 +102,7 @@ def recognize_chords():
             return jsonify({"error": "No valid audio input provided"}), 400
 
         log_info(f"Processing chord recognition request: detector={params['detector']}, "
-                f"chord_dict={params['chord_dict']}, force={params['force']}, "
-                f"use_spleeter={params['use_spleeter']}")
+                f"chord_dict={params['chord_dict']}, force={params['force']}")
 
         # Run chord recognition
         result = chord_service.recognize_chords(
@@ -425,8 +423,7 @@ def test_all_chord_models():
             "default_model": results["available_models"][0] if results["available_models"] else "none"
         }
 
-        # Add Spleeter info
-        results["spleeter_available"] = chord_service.spleeter_service.is_available()
+        results["spleeter_available"] = False
 
         return jsonify(results)
 

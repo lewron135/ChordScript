@@ -80,6 +80,8 @@ def register_blueprints(app: Flask, config) -> None:
     from blueprints.chords import chords_bp
     from blueprints.lyrics import lyrics_bp
     from blueprints.songformer import songformer_bp
+    from blueprints.stems import stems_bp
+    from blueprints.upload import upload_bp
     from blueprints.debug import debug_bp
 
     # Register blueprints
@@ -89,6 +91,8 @@ def register_blueprints(app: Flask, config) -> None:
     app.register_blueprint(chords_bp)
     app.register_blueprint(lyrics_bp)
     app.register_blueprint(songformer_bp)
+    app.register_blueprint(stems_bp)
+    app.register_blueprint(upload_bp)
 
     # Register debug blueprint only in non-production mode
     if not config.PRODUCTION_MODE:
@@ -155,6 +159,15 @@ def init_services(app: Flask, config) -> None:
         services['songformer'] = None
 
 
+
+    # Initialize Demucs stem separation service
+    try:
+        from services.audio.demucs_service import DemucsService
+        services['demucs'] = DemucsService()
+        log_info("Demucs service initialized")
+    except Exception as e:
+        log_info(f"Failed to initialize Demucs service: {e}")
+        services['demucs'] = None
 
     # Store services in app extensions
     app.extensions['services'] = services

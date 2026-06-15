@@ -29,7 +29,7 @@ from app_factory import create_app
 from utils.logging import log_info, log_error, log_debug
 from utils.import_utils import lazy_import_librosa
 from utils.model_utils import (
-    check_spleeter_availability, check_beat_transformer_availability,
+    check_beat_transformer_availability,
     check_chord_cnn_lstm_availability, check_genius_availability,
     check_btc_availability
 )
@@ -110,7 +110,6 @@ except Exception as e:
     log_debug(f"Note: NumPy compatibility patch not needed: {e}")
 
 # Defer all heavy checks to runtime - just assume everything is available for startup
-SPLEETER_AVAILABLE = True  # Will check at runtime
 USE_BEAT_TRANSFORMER = True  # Will check at runtime
 USE_CHORD_CNN_LSTM = True  # Will check at runtime
 GENIUS_AVAILABLE = True  # Will check at runtime

@@ -57,13 +57,6 @@ def validate_chord_recognition_request() -> Tuple[bool, Optional[str], Optional[
         force_param = request.args.get('force', request.form.get('force', '')).lower()
         force = force_param == 'true'
 
-    # Validate use_spleeter parameter
-    if json_data:
-        use_spleeter = json_data.get('useSpleeter', False)
-    else:
-        spleeter_param = request.form.get('use_spleeter', 'false').lower()
-        use_spleeter = spleeter_param == 'true'
-
     # Validate file if provided
     if file and file.filename == '':
         return False, "No file selected", None, {}
@@ -72,7 +65,7 @@ def validate_chord_recognition_request() -> Tuple[bool, Optional[str], Optional[
         'detector': detector,
         'chord_dict': chord_dict,
         'force': force,
-        'use_spleeter': use_spleeter,
+        'use_spleeter': False,
         'audio_path': audio_path,
         'json_data': json_data
     }

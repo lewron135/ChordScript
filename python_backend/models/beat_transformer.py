@@ -300,9 +300,6 @@ class BeatTransformerDetector:
         # Configure environment-aware processing modes
         self._configure_processing_modes()
 
-        # Configure Spleeter GPU usage based on environment
-        self._configure_spleeter_gpu()
-
         # Define Beat Transformer directory
         BEAT_TRANSFORMER_DIR = Path(__file__).parent / "Beat-Transformer"
 
@@ -367,189 +364,14 @@ class BeatTransformerDetector:
         is_local = is_local_development()
 
         if is_local:
-            # Local development: Enable all GPU optimizations
-            self.use_real_spleeter = True
-            self.enable_spleeter_gpu = True
             self.use_gpu_audio_processing = True
             if DEBUG:
                 print("🚀 Local development mode: GPU optimizations enabled")
         else:
-            # Production (Google Cloud Run): Use Spleeter with CPU
-            # CHANGED: Now using Spleeter for production instead of librosa fallback
-            self.use_real_spleeter = True  # Enable real Spleeter for better beat detection
-            self.enable_spleeter_gpu = False  # CPU-only for production stability
             self.use_gpu_audio_processing = False
             if DEBUG:
-                print("🏭 Production mode: Spleeter enabled with CPU-only processing")
+                print("🏭 Production mode: CPU-only processing")
 
-    def _configure_spleeter_gpu(self):
-        """Configure Spleeter GPU usage based on environment"""
-        if self.enable_spleeter_gpu and is_local_development():
-            try:
-                # Remove CUDA_VISIBLE_DEVICES restriction for local development
-                if 'CUDA_VISIBLE_DEVICES' in os.environ:
-                    del os.environ['CUDA_VISIBLE_DEVICES']
-                    if DEBUG:
-                        print("🔧 Removed CUDA_VISIBLE_DEVICES restriction for Spleeter GPU acceleration")
-
-                # Configure TensorFlow for GPU if available (including MPS support)
-                try:
-                    # CRITICAL FIX: Use simplified and robust GPU configuration
-                    gpu_configured = self._configure_tensorflow_gpu()
-
-                    if DEBUG:
-                        if gpu_configured:
-                            print("✅ Spleeter GPU acceleration configured successfully")
-                        else:
-                            print("⚠️  Spleeter will use CPU (no GPU acceleration available)")
-
-                except ImportError:
-                    if DEBUG:
-                        print("⚠️  TensorFlow not available, Spleeter will use CPU")
-                except Exception as e:
-                    if DEBUG:
-                        print(f"⚠️  Could not configure Spleeter GPU: {e}")
-
-            except Exception as e:
-                if DEBUG:
-                    print(f"⚠️  Error configuring Spleeter GPU: {e}")
-        else:
-            # Force CPU for production or when GPU disabled
-            os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-            if DEBUG:
-                print("🔒 Spleeter configured for CPU-only operation (production mode)")
-
-    def _fix_spleeter_click_compatibility(self):
-        """Comprehensive click compatibility fix for newer click versions"""
-        import sys
-
-        # Fix 1: click.termui.get_terminal_size
-        try:
-            from click.termui import get_terminal_size
-        except ImportError:
-            import click.termui
-            import shutil
-
-            def get_terminal_size():
-                """Compatibility function for older Spleeter versions"""
-                try:
-                    size = shutil.get_terminal_size()
-                    return size.columns, size.lines
-                except Exception:
-                    return 80, 24
-
-            click.termui.get_terminal_size = get_terminal_size
-            if DEBUG:
-                print("🔧 Applied click.termui.get_terminal_size compatibility fix")
-
-        # Fix 2: click._bashcomplete (replaced with click.shell_completion in newer versions)
-        try:
-            import click._bashcomplete
-        except ImportError:
-            # Create a compatibility module for click._bashcomplete
-            try:
-                import click.shell_completion
-
-                # Create a mock _bashcomplete module with the functions Spleeter needs
-                class MockBashComplete:
-                    """Mock _bashcomplete module for Spleeter compatibility"""
-
-                    @staticmethod
-                    def get_completion_script(*args, **kwargs):
-                        """Mock function for bash completion script generation"""
-                        return ""
-
-                    @staticmethod
-                    def complete_option(*args, **kwargs):
-                        """Mock function for option completion"""
-                        return []
-
-                    @staticmethod
-                    def complete_command(*args, **kwargs):
-                        """Mock function for command completion"""
-                        return []
-
-                # Add the mock module to sys.modules
-                sys.modules['click._bashcomplete'] = MockBashComplete()
-                if DEBUG:
-                    print("🔧 Applied click._bashcomplete compatibility fix using shell_completion")
-
-            except ImportError:
-                # Fallback: create a minimal mock module
-                class MinimalBashComplete:
-                    """Minimal mock for environments without shell_completion"""
-
-                    def __getattr__(self, name):
-                        """Return a no-op function for any missing attribute"""
-                        def no_op(*args, **kwargs):
-                            return [] if 'complete' in name else ""
-                        return no_op
-
-                sys.modules['click._bashcomplete'] = MinimalBashComplete()
-                if DEBUG:
-                    print("🔧 Applied minimal click._bashcomplete compatibility fix")
-
-    def _configure_tensorflow_gpu(self):
-        """Simplified and robust TensorFlow GPU configuration for Spleeter"""
-        try:
-            import tensorflow as tf
-            import platform
-
-            # Check system type
-            is_apple_silicon = platform.system() == 'Darwin' and platform.machine() == 'arm64'
-
-            if is_apple_silicon:
-                # CRITICAL FIX: Proper MPS configuration for Apple Silicon
-                if DEBUG:
-                    print("🍎 Configuring TensorFlow for Apple Silicon MPS...")
-
-                # Check if MPS is available in this TensorFlow version
-                try:
-                    # For TensorFlow 2.5+, try to use MPS
-                    gpus = tf.config.experimental.list_physical_devices('GPU')
-                    if gpus:
-                        if DEBUG:
-                            print(f"🎯 Found {len(gpus)} GPU device(s) for TensorFlow")
-                        for gpu in gpus:
-                            tf.config.experimental.set_memory_growth(gpu, True)
-                        return True
-                    else:
-                        # Try alternative MPS detection
-                        if DEBUG:
-                            print("🔍 Checking for MPS support...")
-                        # Force TensorFlow to recognize MPS if available
-                        with tf.device('/GPU:0'):
-                            # Simple test to see if GPU is available
-                            test_tensor = tf.constant([1.0, 2.0, 3.0])
-                            result = tf.reduce_sum(test_tensor)
-                        if DEBUG:
-                            print("✅ MPS GPU acceleration confirmed working")
-                        return True
-
-                except Exception as e:
-                    if DEBUG:
-                        print(f"⚠️  MPS configuration failed: {e}")
-                    return False
-            else:
-                # CUDA configuration for non-Apple systems
-                if DEBUG:
-                    print("🖥️  Configuring TensorFlow for CUDA...")
-                gpus = tf.config.experimental.list_physical_devices('GPU')
-                if gpus:
-                    for gpu in gpus:
-                        tf.config.experimental.set_memory_growth(gpu, True)
-                    if DEBUG:
-                        print(f"✅ CUDA GPU acceleration enabled with {len(gpus)} GPU(s)")
-                    return True
-                else:
-                    if DEBUG:
-                        print("⚠️  No CUDA GPUs detected")
-                    return False
-
-        except Exception as e:
-            if DEBUG:
-                print(f"⚠️  TensorFlow GPU configuration failed: {e}")
-            return False
 
     def get_device_info(self):
         """Get information about the current device configuration"""
@@ -559,10 +381,7 @@ class BeatTransformerDetector:
             "gpu_acceleration_enabled": self.device.type != "cpu",
             "environment": "local_development" if is_local_development() else "production",
             "device_manager_available": self.device_manager is not None,
-            # Phase 1 GPU acceleration features
             "processing_modes": {
-                "use_real_spleeter": getattr(self, 'use_real_spleeter', False),
-                "enable_spleeter_gpu": getattr(self, 'enable_spleeter_gpu', False),
                 "use_gpu_audio_processing": getattr(self, 'use_gpu_audio_processing', False)
             }
         }
@@ -574,178 +393,16 @@ class BeatTransformerDetector:
                 "is_gpu": self.device_manager.is_gpu
             })
 
-            # Add device-specific information
             if hasattr(self.device_manager, '_device_info'):
                 info["device_details"] = self.device_manager._device_info
 
         return info
 
     def demix_audio_to_spectrogram(self, audio_file, sr=44100, n_fft=4096, n_mels=128, fmin=30, fmax=11000):
-        """Enhanced demixing with real Spleeter - now used for both local and production
-
-        This method uses real Spleeter 5-stems separation for better beat detection accuracy.
-        Librosa fallback is commented out to ensure Spleeter is always used.
-        """
-        # CHANGED: Always use Spleeter, no fallback to librosa
+        """Generate a 5-channel spectrogram using librosa (Demucs-free path for beat detection)."""
         if DEBUG:
-            print("🎵 Using real Spleeter 5-stems separation...")
-        return self._demix_with_real_spleeter(audio_file, sr, n_fft, n_mels, fmin, fmax)
-
-        # COMMENTED OUT: Librosa fallback - we now require Spleeter for production
-        # if self.use_real_spleeter:
-        #     try:
-        #         print("🎵 Attempting real Spleeter 5-stems separation...")
-        #         return self._demix_with_real_spleeter(audio_file, sr, n_fft, n_mels, fmin, fmax)
-        #     except Exception as e:
-        #         print(f"⚠️  Spleeter separation failed: {e}")
-        #         print("🔄 Falling back to librosa-based approach...")
-        #         return self._demix_with_librosa_fallback(audio_file, sr, n_fft, n_mels, fmin, fmax)
-        # else:
-        #     print("🎼 Using librosa-based spectrogram creation (production mode)")
-        #     return self._demix_with_librosa_fallback(audio_file, sr, n_fft, n_mels, fmin, fmax)
-
-    def _demix_with_real_spleeter(self, audio_file, sr=44100, n_fft=4096, n_mels=128, fmin=30, fmax=11000):
-        """Real Spleeter-based demixing implementation"""
-        import tempfile
-        import shutil
-
-        # CRITICAL FIX: Handle click.termui compatibility issue with newer click versions
-        self._fix_spleeter_click_compatibility()
-
-        # Import Spleeter components
-        try:
-            from spleeter.separator import Separator
-            from spleeter.audio.adapter import AudioAdapter
-        except ImportError as e:
-            raise ImportError(f"Spleeter not available: {e}")
-
-        if DEBUG:
-            print(f"🚀 Starting Spleeter GPU-accelerated separation for {audio_file}")
-
-        # Create a temporary directory for processing
-        temp_dir = tempfile.mkdtemp()
-
-        try:
-            # Load audio using Spleeter's adapter
-            audio_loader = AudioAdapter.default()
-            waveform, _ = audio_loader.load(audio_file, sample_rate=sr)
-            if DEBUG:
-                print(f"📁 Loaded audio with shape: {waveform.shape}")
-
-            # Initialize Spleeter for 5-stems demixing
-            # Use local model path to avoid GitHub download issues
-            if DEBUG:
-                print("🔧 Initializing Spleeter 5-stems separator...")
-            from pathlib import Path
-            # Note: Spleeter caches to ~/.cache/spleeter/pretrained_models/5stems by default
-            cache_candidates = [
-                Path.home() / ".cache" / "spleeter" / "pretrained_models" / "5stems",
-                Path.home() / ".cache" / "spleeter" / "5stems",  # legacy/misplaced
-            ]
-            if DEBUG:
-                print("🔧 Initializing Spleeter 5-stems separator...")
-                print("🔎 Spleeter cache candidates:")
-                for p in cache_candidates:
-                    print(f"   - {p} (exists={p.exists()})")
-
-            # Pre-check: is the default pretrained cache present?
-            default_dir = cache_candidates[0]
-            checkpoint_files = list(default_dir.glob("**/checkpoint")) if default_dir.exists() else []
-
-            # Try to use local cached model first to avoid GitHub download issues
-            if default_dir.exists() and checkpoint_files:
-                if DEBUG:
-                    print(f"✅ Found Spleeter model in cache: {default_dir}")
-                # Use local model path directly to avoid ModelProvider download
-                separator = Separator(f'spleeter:5stems', multiprocess=False)
-                # Override model_dir to use cached model
-                separator._params['model_dir'] = str(default_dir)
-            else:
-                print("⚠️  Spleeter pretrained 5stems model not found locally; will attempt provider-managed download...")
-                # Let Spleeter manage model discovery/download by default
-                separator = Separator('spleeter:5stems', multiprocess=False)
-
-            # Prefer a bundled local model if present to avoid network/download issues.
-            # IMPORTANT: ModelProvider expects model_dir to be the actual model folder (e.g., '<root>/5stems')
-            local_model_root = (Path(__file__).resolve().parent.parent / 'pretrained_models')
-            local_model_dir = local_model_root / '5stems'
-            if local_model_dir.exists() and (local_model_dir / 'checkpoint').exists():
-                try:
-                    # Create Spleeter probe file so ModelProvider doesn't try to download
-                    probe = local_model_dir / '.probe'
-                    if not probe.exists():
-                        probe.write_text('OK')
-                    separator._params['model_dir'] = str(local_model_dir)
-                    if DEBUG:
-                        print(f"📁 Using bundled Spleeter model at: {local_model_dir}")
-                except Exception as e:
-                    if DEBUG:
-                        print(f"⚠️ Could not set bundled model_dir: {e}")
-            else:
-                # If user cache exists, optionally log it for diagnostics
-                default_dir = cache_candidates[0]
-                if default_dir.exists():
-                    if DEBUG:
-                        print(f"📁 Using default Spleeter cache at: {default_dir}")
-
-            # Separate the audio into 5 stems
-            if DEBUG:
-                print("🎛️  Separating audio with Spleeter...")
-            try:
-                demixed = separator.separate(waveform)
-            except Exception as e:
-                # Provide a precise, actionable message about likely root causes
-                from pathlib import Path
-                details = []
-                default_dir = Path.home() / ".cache" / "spleeter" / "pretrained_models" / "5stems"
-                details.append(f"expected_cache={default_dir} exists={default_dir.exists()}")
-                ckpt = list(default_dir.glob("**/checkpoint")) if default_dir.exists() else []
-                details.append(f"checkpoint_files_found={len(ckpt)}")
-                raise RuntimeError(
-                    "Spleeter failed to load its 5-stems model checkpoint. "
-                    "This usually means the pretrained model is missing or the cache is corrupt. "
-                    f"({' ; '.join(details)})\n"
-                    "How to fix: (1) ensure internet so Spleeter can download on first use; "
-                    "(2) or pre-download models by running `spleeter separate -p spleeter:5stems -o /tmp/test` once; "
-                    "(3) or copy the 5stems model directory into ~/.cache/spleeter/pretrained_models/5stems."
-                ) from e
-            stems = list(demixed.keys())
-            if DEBUG:
-                print(f"✅ Separation complete. Got {len(demixed)} stems: {stems}")
-
-            # Create Mel filter bank
-            mel_f = librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=n_mels, fmin=fmin, fmax=fmax).T
-
-            # Process each stem to create spectrograms
-            spectrograms = []
-            for stem_name in stems:
-                if DEBUG:
-                    print(f"🎵 Processing stem: {stem_name}")
-
-                # Get the separated audio for this stem
-                stem_audio = demixed[stem_name]
-
-                # Convert to mono if stereo
-                if len(stem_audio.shape) > 1:
-                    stem_audio = np.mean(stem_audio, axis=1)
-
-                # Create spectrogram using librosa with exact Beat-Transformer parameters
-                stft = librosa.stft(stem_audio, n_fft=n_fft, hop_length=n_fft//4)
-                stft_power = np.abs(stft)**2
-                spec = np.dot(stft_power.T, mel_f)
-                spec_db = librosa.power_to_db(spec, ref=np.max)
-                spectrograms.append(spec_db)
-
-            # Stack all stem spectrograms (shape: num_channels x time x mel_bins)
-            result = np.stack(spectrograms, axis=0)
-            if DEBUG:
-                print(f"🎯 Real Spleeter processing complete. Output shape: {result.shape}")
-
-            return result
-
-        finally:
-            # Clean up temporary directory
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            print("🎼 Using librosa-based audio processing for Beat-Transformer...")
+        return self._demix_with_librosa_fallback(audio_file, sr, n_fft, n_mels, fmin, fmax)
 
     def _demix_with_librosa_fallback(self, audio_file, sr=44100, n_fft=4096, n_mels=128, fmin=30, fmax=11000):
         """Fallback librosa-based approach (original implementation)

@@ -9,22 +9,6 @@ from pathlib import Path
 from utils.logging import log_info, log_error, log_debug
 
 
-def check_spleeter_availability():
-    """
-    Check if Spleeter is available without loading models.
-    
-    Returns:
-        bool: True if Spleeter is available
-    """
-    try:
-        import spleeter
-        log_debug("Spleeter is available")
-        return True
-    except ImportError as e:
-        log_debug(f"Spleeter not available: {e}")
-        return False
-
-
 def check_beat_transformer_availability():
     """
     Check if Beat-Transformer is available without loading it.
@@ -291,7 +275,6 @@ def get_all_model_availability():
     """
     try:
         availability = {
-            'spleeter': check_spleeter_availability(),
             'beat_transformer': check_beat_transformer_availability(),
             'chord_cnn_lstm': check_chord_cnn_lstm_availability(),
             'genius': check_genius_availability(),

@@ -13,7 +13,6 @@ from services.detectors.chord_cnn_lstm_detector import ChordCNNLSTMDetectorServi
 from services.detectors.btc_sl_detector import BTCSLDetectorService
 from services.detectors.btc_pl_detector import BTCPLDetectorService
 from services.audio.audio_utils import validate_audio_file, get_audio_duration
-from services.audio.spleeter_service import SpleeterService
 from utils.chord_mappings import (
     get_supported_chord_dicts, 
     get_default_chord_dict, 
@@ -41,9 +40,6 @@ class ChordRecognitionService:
             'btc-sl': 50,          # 50MB limit for BTC-SL
             'btc-pl': 50           # 50MB limit for BTC-PL
         }
-        
-        # Initialize Spleeter service
-        self.spleeter_service = SpleeterService()
     
     def get_available_detectors(self) -> List[str]:
         """
@@ -170,19 +166,19 @@ class ChordRecognitionService:
         # If no detector can handle the file size, use the most permissive one
         return max(available_detectors, key=lambda d: self.size_limits[d])
     
-    def recognize_chords(self, file_path: str, detector: str = 'auto', 
+    def recognize_chords(self, file_path: str, detector: str = 'auto',
                         chord_dict: str = None, force: bool = False,
                         use_spleeter: bool = False) -> Dict[str, Any]:
         """
         Recognize chords in an audio file.
-        
+
         Args:
             file_path: Path to the audio file
             detector: Detector to use ('chord-cnn-lstm', 'btc-sl', 'btc-pl', 'auto')
             chord_dict: Chord dictionary to use (if None, uses model default)
             force: Force use of requested detector even if file is large
-            use_spleeter: Whether to use Spleeter for audio separation
-            
+            use_spleeter: Ignored — Spleeter has been removed.
+
         Returns:
             Dict containing chord recognition results with normalized format
         """
@@ -228,36 +224,15 @@ class ChordRecognitionService:
                 chord_dict = supported_dicts[0] if supported_dicts else 'submission'
                 log_info(f"Using fallback chord dictionary: {chord_dict}")
             
-            # Process with Spleeter if requested
-            audio_file_to_process = file_path
-            spleeter_info = None
-            
-            if use_spleeter and self.spleeter_service.is_available():
-                log_info("Using Spleeter for audio separation")
-                spleeter_result = self.spleeter_service.extract_vocals(file_path)
-                if spleeter_result.get("success"):
-                    # Use the vocals track for chord recognition
-                    audio_file_to_process = spleeter_result.get("vocals_path", file_path)
-                    spleeter_info = {
-                        "used": True,
-                        "model": "2stems-16kHz",
-                        "processing_time": spleeter_result.get("processing_time", 0.0)
-                    }
-                    log_info(f"Using separated vocals: {audio_file_to_process}")
-                else:
-                    log_error(f"Spleeter separation failed: {spleeter_result.get('error')}")
-                    spleeter_info = {"used": False, "error": spleeter_result.get("error")}
-            
             # Run chord recognition
-            result = detector_service.recognize_chords(audio_file_to_process, chord_dict)
+            result = detector_service.recognize_chords(file_path, chord_dict)
             
             # Add metadata
             result['file_size_mb'] = file_size_mb
             result['detector_selected'] = selected_detector
             result['detector_requested'] = detector
             result['force_used'] = force
-            result['spleeter_info'] = spleeter_info
-            
+
             # Add audio duration if not present
             if 'duration' not in result or result['duration'] == 0:
                 try:
@@ -268,14 +243,7 @@ class ChordRecognitionService:
             
             total_time = time.time() - start_time
             result['total_processing_time'] = total_time
-            
-            # Cleanup Spleeter files if used
-            if spleeter_info and spleeter_info.get("used"):
-                try:
-                    self.spleeter_service.cleanup_stems(spleeter_result)
-                except Exception as e:
-                    log_error(f"Failed to cleanup Spleeter files: {e}")
-            
+
             if result.get('success'):
                 log_info(f"Chord recognition successful: {result['total_chords']} chords, "
                         f"Model: {result['model_used']}, "
@@ -305,18 +273,14 @@ class ChordRecognitionService:
         info = {
             "available_detectors": self.get_available_detectors(),
             "detectors": {},
-            "spleeter_available": self.spleeter_service.is_available()
+            "spleeter_available": False
         }
-        
+
         for name, detector in self.detectors.items():
             detector_info = detector.get_model_info()
             detector_info["size_limit_mb"] = self.size_limits[name]
             detector_info["supported_chord_dicts"] = get_supported_chord_dicts(name)
             detector_info["default_chord_dict"] = get_default_chord_dict(name)
             info["detectors"][name] = detector_info
-        
-        # Add Spleeter info
-        if self.spleeter_service.is_available():
-            info["spleeter_info"] = self.spleeter_service.get_model_info()
-        
+
         return info
